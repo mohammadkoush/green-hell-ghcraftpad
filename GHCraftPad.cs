@@ -46,7 +46,7 @@ namespace GHCraftPad
     {
         public const string Guid    = "com.mohammadkoush.ghcraftpad";
         public const string Name    = "GHCraftPad";
-        public const string Version = "1.0.0";
+        public const string Version = "1.1.0";
 
         private static GHCraftPadPlugin s_Self;
 
@@ -54,6 +54,12 @@ namespace GHCraftPad
         private ConfigEntry<bool>   _showLocked;
         private ConfigEntry<bool>   _groundIfNoRoom;
         private ConfigEntry<string> _padPos;
+        // Where a crafted item goes. His arrows: up = send to storage, down = send to backpack,
+        // neither = the game's own way (backpack, or the ground in front of you when it will not fit).
+        // Only one can be solid at a time; both can be outlines.
+        private ConfigEntry<string> _destination;      // "None" | "Storage" | "Backpack"
+        private Texture2D _upOutline, _upSolid, _downOutline, _downSolid;
+        private string _arrowHint = "";
 
         // ---- a recipe, as the pad sees it -------------------------------------------------------
         private class Line
@@ -96,6 +102,10 @@ namespace GHCraftPad
                 "A crafted item that does not fit in your backpack is dropped on the ground in " +
                 "front of you. Off: the game's own behaviour, which leaves it on the table.");
             _padPos = Config.Bind("Pad", "PadPosition", "", "Where the pad was last dragged. Written automatically.");
+            _destination = Config.Bind("Pad", "CraftedItemGoesTo", "None",
+                new ConfigDescription("Where a crafted item goes: Storage (the nearest box in range with " +
+                    "room), Backpack, or None for the game's own way. The two arrows on the pad set this.",
+                    new AcceptableValueList<string>("None", "Storage", "Backpack")));
             LoadPos();
 
             try
@@ -149,6 +159,10 @@ namespace GHCraftPad
                     s_Self.ForgetGone();
                     s_Self._linesAt = 0f;
 
+                    // UP ARROW: send to storage. The game has just put the result in the backpack
+                    // (or on the table if it did not fit); the nearest box in range with room takes it.
+                    if (s_Self._destination.Value == "Storage" && s_Self.SendToStorage(__instance, __result)) return;
+
                     if (!s_Self._groundIfNoRoom.Value) return;
                     if (!__result.m_OnCraftingTable) return;          // it fitted; nothing to do
 
@@ -164,6 +178,37 @@ namespace GHCraftPad
                 }
                 catch (Exception ex) { s_Self.Logger.LogWarning("crafted item to ground: " + ex.Message); }
             }
+        }
+
+        private bool SendToStorage(CraftingManager cm, Item result)
+        {
+            try
+            {
+                InventoryBackpack bp = InventoryBackpack.Get();
+                List<Storage> boxes = BoxesInRange();
+                if (boxes.Count == 0) { Say("No box in range - " + Pretty(result.m_Info.m_ID) + " stays with you"); return false; }
+
+                // Out of wherever the game put it - the same object moves, never a copy.
+                if (result.m_OnCraftingTable) cm.RemoveItem(result, false, true);
+                else if (bp != null && bp.m_Items != null && bp.m_Items.Contains(result)) bp.RemoveItem(result, false);
+
+                for (int i = 0; i < boxes.Count; i++)
+                {
+                    InsertResult r = boxes[i].InsertItem(result, null, null, false, false, false);   // no drop: try the next box
+                    if (r == InsertResult.Ok)
+                    {
+                        Logger.LogInfo("crafted " + result.m_Info.m_ID + " sent to storage (" + boxes[i].gameObject.name + ")");
+                        Say(Pretty(result.m_Info.m_ID) + " sent to storage");
+                        return true;
+                    }
+                }
+                // Every box full: back to the backpack, and if that fails too, the ground.
+                InsertResult back = (bp != null) ? bp.InsertItem(result, null, null, true, true, true, true, true) : InsertResult.CantInsert;
+                Logger.LogInfo("crafted " + result.m_Info.m_ID + ": every box in range is full - " + (back == InsertResult.Ok ? "kept in the backpack" : "dropped at your feet"));
+                Say("Boxes full - " + Pretty(result.m_Info.m_ID) + (back == InsertResult.Ok ? " kept with you" : " is on the ground"));
+                return true;
+            }
+            catch (Exception ex) { Logger.LogWarning("send to storage: " + ex.Message); return false; }
         }
 
         private void ReturnBorrowed(CraftingManager cm)
@@ -428,7 +473,17 @@ namespace GHCraftPad
         {
             GUI.DrawTexture(new Rect(0f, 0f, _rect.width, _rect.height), _pixel);
             GUILayout.BeginVertical();
-            GUILayout.Label("Crafting pad", _title);
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Crafting pad", _title, GUILayout.ExpandWidth(true));
+            _arrowHint = "";
+            Arrow(true);
+            GUILayout.Space(6f);
+            Arrow(false);
+            GUILayout.EndHorizontal();
+            if (_arrowHint.Length > 0) GUILayout.Label(_arrowHint, _small);
+            else GUILayout.Label(_destination.Value == "Storage" ? "Crafted items go to the nearest box"
+                               : _destination.Value == "Backpack" ? "Crafted items go to your backpack"
+                               : "Crafted items go where the game puts them", _small);
             GUILayout.Label(_boxesInRange + " box" + (_boxesInRange == 1 ? "" : "es") + " within "
                             + Mathf.RoundToInt(_radius.Value) + " m   -   wheel: how many, click: make", _small);
 
@@ -473,6 +528,68 @@ namespace GHCraftPad
             if (v != _padPos.Value) _padPos.Value = v;
         }
 
+        /// <summary>
+        /// One arrow. Outline when off, solid when on; only one of the two can be solid, both can be
+        /// outlines; clicking a solid one makes it an outline again. Hovering names what it does.
+        /// </summary>
+        private void Arrow(bool up)
+        {
+            string mode = up ? "Storage" : "Backpack";
+            bool on = _destination.Value == mode;
+            Texture2D tex = up ? (on ? _upSolid : _upOutline) : (on ? _downSolid : _downOutline);
+            Rect r = GUILayoutUtility.GetRect(30f, 30f, GUILayout.Width(30f), GUILayout.Height(30f));
+            bool hover = r.Contains(Event.current.mousePosition);
+            if (hover) _arrowHint = up ? "Send crafted items to storage" : "Send crafted items to backpack";
+            if (Event.current.type == EventType.Repaint)
+            {
+                if (hover) GUI.DrawTexture(r, _hover);
+                GUI.DrawTexture(r, tex, ScaleMode.ScaleToFit, true);
+            }
+            if (Event.current.type == EventType.MouseUp && hover)
+            {
+                _destination.Value = on ? "None" : mode;            // on -> off; off -> on, and the other goes off
+                Logger.LogInfo("pad: crafted items go to " + _destination.Value);
+                Event.current.Use();
+            }
+        }
+
+        /// <summary>An up or down arrow, 32 px, as an outline or a solid. Drawn, not a font glyph.</summary>
+        private static Texture2D ArrowTex(bool up, bool solid)
+        {
+            const int S = 32;
+            Texture2D t = new Texture2D(S, S, TextureFormat.ARGB32, false);
+            Color ink = new Color(0.85f, 0.87f, 0.92f, 1f);
+            Color none = new Color(0f, 0f, 0f, 0f);
+            for (int y = 0; y < S; y++)
+                for (int x = 0; x < S; x++)
+                {
+                    // Texture rows go bottom-up; flip so "up" points up on screen.
+                    int yy = up ? (S - 1 - y) : y;
+                    bool inHead = yy < 16 && Mathf.Abs(x - 15.5f) <= (yy + 1) * 0.95f;
+                    bool inShaft = yy >= 16 && yy < 29 && Mathf.Abs(x - 15.5f) <= 4.5f;
+                    bool inside = inHead || inShaft;
+                    bool px;
+                    if (solid) px = inside;
+                    else
+                    {
+                        // An outline: inside, but with a neighbour that is outside.
+                        px = false;
+                        if (inside)
+                            for (int dy = -2; dy <= 2 && !px; dy++)
+                                for (int dx = -2; dx <= 2 && !px; dx++)
+                                {
+                                    int nx = x + dx, ny = yy + dy;
+                                    bool nHead = ny < 16 && Mathf.Abs(nx - 15.5f) <= (ny + 1) * 0.95f;
+                                    bool nShaft = ny >= 16 && ny < 29 && Mathf.Abs(nx - 15.5f) <= 4.5f;
+                                    if (ny < 0 || ny >= S || nx < 0 || nx >= S || !(nHead || nShaft)) px = true;
+                                }
+                    }
+                    t.SetPixel(x, y, px ? ink : none);
+                }
+            t.Apply();
+            return t;
+        }
+
         private void Say(string text)
         {
             _notice = text;
@@ -499,6 +616,8 @@ namespace GHCraftPad
             _pixel.SetPixel(0, 0, new Color(0.06f, 0.07f, 0.10f, 0.92f)); _pixel.Apply();
             _hover = new Texture2D(1, 1, TextureFormat.ARGB32, false);
             _hover.SetPixel(0, 0, new Color(1f, 1f, 1f, 0.08f)); _hover.Apply();
+            _upOutline = ArrowTex(true, false);  _upSolid = ArrowTex(true, true);
+            _downOutline = ArrowTex(false, false); _downSolid = ArrowTex(false, true);
 
             _title = new GUIStyle(GUI.skin.label); _title.fontSize = 18; _title.fontStyle = FontStyle.Bold;
             _title.normal.textColor = new Color(0.96f, 0.97f, 1f);
