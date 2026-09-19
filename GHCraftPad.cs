@@ -46,7 +46,7 @@ namespace GHCraftPad
     {
         public const string Guid    = "com.mohammadkoush.ghcraftpad";
         public const string Name    = "GHCraftPad";
-        public const string Version = "2.0.0";
+        public const string Version = "2.1.0";
 
         private static GHCraftPadPlugin s_Self;
 
@@ -68,6 +68,33 @@ namespace GHCraftPad
             public int FromBoxes;                  // how many ingredient units would come from boxes
             public string Missing;                 // "2 Rope" when CanMake == 0
             public int Count = 1;                  // what the wheel dialled
+            public int Cat;                        // index into Cats
+            public bool Header;                    // a category line, not a recipe
+        }
+
+        // The categories, in the order they are printed. From ItemInfo.m_Type, the game's own.
+        private static readonly string[] Cats = new string[] { "Weapons", "Tools", "Armor", "Food and medicine", "Camp", "Other" };
+
+        private static int CatOf(ItemInfo info)
+        {
+            switch (info.m_Type)
+            {
+                case Enums.ItemType.Weapon: case Enums.ItemType.Spear: case Enums.ItemType.Bow: case Enums.ItemType.Arrow:
+                case Enums.ItemType.Blowpipe: case Enums.ItemType.BlowpipeArrow: case Enums.ItemType.Dynamite:
+                    return 0;
+                case Enums.ItemType.ItemTool: case Enums.ItemType.Torch:
+                    return 1;
+                case Enums.ItemType.Armor:
+                    return 2;
+                case Enums.ItemType.Food: case Enums.ItemType.Herb: case Enums.ItemType.Dressing:
+                case Enums.ItemType.Bowl: case Enums.ItemType.LiquidContainer:
+                    return 3;
+                case Enums.ItemType.Construction: case Enums.ItemType.Trap: case Enums.ItemType.Stand:
+                case Enums.ItemType.Trough: case Enums.ItemType.BigStorage: case Enums.ItemType.Form: case Enums.ItemType.FormBaked:
+                    return 4;
+                default:
+                    return 5;
+            }
         }
 
         private readonly List<Line> _lines = new List<Line>();
@@ -79,7 +106,8 @@ namespace GHCraftPad
 
         // ---- pad ----------------------------------------------------------------------------------
         private bool _padOpen;
-        private GUIStyle _title, _row, _rowDim, _small, _btn, _btnDim;
+        private GUIStyle _title, _row, _rowDim, _small, _btn, _btnDim, _head;
+        private Font _chisel;
         private bool _styled;
         private Texture2D _pixel, _hover;
         private string _notice = "";
@@ -91,8 +119,9 @@ namespace GHCraftPad
             _radius = Config.Bind("Pad", "BoxRadiusMetres", 15f,
                 new ConfigDescription("How far around you the pad looks for storage boxes. A slider " +
                     "at the top of the pad.", new AcceptableValueRange<float>(3f, 100f)));
-            _showLocked = Config.Bind("Pad", "ShowRecipesNotYetLearned", false,
-                "List recipes the game has not unlocked for you yet, greyed. Off: only what you know.");
+            _showLocked = Config.Bind("Pad", "ShowNotLearnedRecipes", true,
+                "List recipes the game has not unlocked for you yet, greyed and marked. Off: only what " +
+                "you know. On by default since 2.1.0 - his ask was every recipe.");
             _groundIfNoRoom = Config.Bind("Pad", "CraftedItemToGroundIfNoRoom", true,
                 "A crafted item that does not fit in your backpack is dropped on the ground in " +
                 "front of you. Off: the game's own behaviour, which leaves it on the table.");
@@ -295,12 +324,28 @@ namespace GHCraftPad
             for (int i = 0; i < boxes.Count; i++) CountInto(inBoxes, boxes[i].m_Items);
             foreach (KeyValuePair<int, int> kv in inBoxes) { int n; have.TryGetValue(kv.Key, out n); have[kv.Key] = n + kv.Value; }
 
-            Dictionary<int, ItemInfo> all = im.GetAllInfos();
-            if (all == null) return;
-            foreach (KeyValuePair<int, ItemInfo> kv in all)
+            // THE GAME'S OWN LIST, not a filter of mine. "Not all the recipes are there": the first
+            // build kept only infos with m_Craftable set, and the game does not - its
+            // CraftingManager.InitializeAvailableItems takes every ItemInfo that is not a
+            // construction and has components, into m_AvailableItems, and CheckResult matches the
+            // table against exactly that list. So that list is read (private, via Traverse), and
+            // when it is empty the same rule is applied to GetAllInfos.
+            List<ItemInfo> source = null;
+            try { source = Traverse.Create(cm).Field("m_AvailableItems").GetValue<List<ItemInfo>>(); } catch (Exception) { }
+            if (source == null || source.Count == 0)
             {
-                ItemInfo info = kv.Value;
-                if (info == null || !info.m_Craftable) continue;
+                source = new List<ItemInfo>();
+                Dictionary<int, ItemInfo> all = im.GetAllInfos();
+                if (all == null) return;
+                foreach (KeyValuePair<int, ItemInfo> kv in all)
+                    if (kv.Value != null && !kv.Value.IsConstruction() && kv.Value.m_Components != null && kv.Value.m_Components.Count > 0)
+                        source.Add(kv.Value);
+            }
+            if (!_sourceReported) { _sourceReported = true; Logger.LogInfo("recipes: " + source.Count + " in the game's list"); }
+            for (int si = 0; si < source.Count; si++)
+            {
+                ItemInfo info = source[si];
+                if (info == null) continue;
                 Dictionary<int, int> comps = info.m_Components;
                 if (comps == null || comps.Count == 0) continue;
                 bool locked = im.m_CraftingLockedItems != null && im.m_CraftingLockedItems.Contains(info.m_ID);
@@ -308,6 +353,7 @@ namespace GHCraftPad
 
                 Line ln = new Line();
                 ln.Result = info.m_ID;
+                ln.Cat = CatOf(info);
                 ln.Label = Pretty(info.m_ID) + (locked ? "  (not learned yet)" : "");
                 ln.Need = comps;
                 int can = int.MaxValue;
@@ -328,12 +374,27 @@ namespace GHCraftPad
                 if (ln.Count > ln.CanMake) ln.Count = Mathf.Max(1, ln.CanMake);
                 _lines.Add(ln);
             }
+            // Categorised: by category, then makeable first, then name; a header line per category.
             _lines.Sort(delegate (Line a, Line b)
             {
+                if (a.Cat != b.Cat) return a.Cat.CompareTo(b.Cat);
                 if ((a.CanMake > 0) != (b.CanMake > 0)) return a.CanMake > 0 ? -1 : 1;
                 return string.Compare(a.Label, b.Label, StringComparison.OrdinalIgnoreCase);
             });
+            int lastCat = -1;
+            for (int i = 0; i < _lines.Count; i++)
+            {
+                if (_lines[i].Cat == lastCat) continue;
+                lastCat = _lines[i].Cat;
+                int made = 0; for (int k = i; k < _lines.Count && _lines[k].Cat == lastCat; k++) if (_lines[k].CanMake > 0) made++;
+                Line h = new Line();
+                h.Header = true; h.Cat = lastCat;
+                h.Label = Cats[lastCat].ToUpperInvariant() + (made > 0 ? "   (" + made + " you can make)" : "");
+                _lines.Insert(i, h);
+                i++;
+            }
         }
+        private bool _sourceReported;
 
         // -----------------------------------------------------------------------------------------
         // The pull, and the craft
@@ -504,12 +565,8 @@ namespace GHCraftPad
 
             // Header line: what the wheel and the click do, and how many boxes are in reach.
             Rect head = new Rect(area.x, area.y, area.width, rowH);
-            Print(head, _boxesInRange + " box" + (_boxesInRange == 1 ? "" : "es") + " in reach   -   wheel: how many, click: bring to the table", _small, false);
-            if (e.type == EventType.ScrollWheel && head.Contains(e.mousePosition))
-            {
-                _firstLine = Mathf.Clamp(_firstLine + (int)Mathf.Sign(e.delta.y), 0, Mathf.Max(0, _lines.Count - 1));
-                e.Use();
-            }
+            Print(head, _boxesInRange + " box" + (_boxesInRange == 1 ? "" : "es") + " in reach   -   wheel on a line: how many, click: bring to the table, wheel on a heading: scroll", _small, false);
+            bool scrollHere = e.type == EventType.ScrollWheel && (head.Contains(e.mousePosition) || e.shift);
 
             int fit = Mathf.Max(1, (int)((area.height - rowH) / rowH));
             if (_lines.Count == 0)
@@ -522,11 +579,17 @@ namespace GHCraftPad
             for (int i = _firstLine; i < _lines.Count && i < _firstLine + fit; i++, y += rowH)
             {
                 Line ln = _lines[i];
-                bool can = ln.CanMake > 0;
-                string right = can ? (ln.Count + " of " + ln.CanMake) : ("need " + ln.Missing);
-                string text = ln.Label + "    " + right + (can && ln.FromBoxes > 0 ? "   (" + ln.FromBoxes + " from boxes)" : "");
                 Rect rr = new Rect(area.x, y, area.width, rowH);
                 bool hover = rr.Contains(e.mousePosition);
+                if (ln.Header)
+                {
+                    Print(rr, ln.Label, _head, false);
+                    if (hover && e.type == EventType.ScrollWheel) scrollHere = true;
+                    continue;
+                }
+                bool can = ln.CanMake > 0;
+                string right = can ? (ln.Count + " of " + ln.CanMake) : ("need " + ln.Missing);
+                string text = "    " + ln.Label + "    " + right + (can && ln.FromBoxes > 0 ? "   (" + ln.FromBoxes + " from boxes)" : "");
                 if (hover && e.type == EventType.Repaint) GUI.DrawTexture(rr, _hover);
                 Print(rr, text, can ? _row : _rowDim, hover);
 
@@ -543,7 +606,12 @@ namespace GHCraftPad
                 }
             }
             if (_firstLine + fit < _lines.Count)
-                Print(new Rect(area.x, y, area.width, rowH), "... " + (_lines.Count - _firstLine - fit) + " more (wheel over the top line)", _small, false);
+                Print(new Rect(area.x, y, area.width, rowH), "... " + (_lines.Count - _firstLine - fit) + " more (wheel over a heading)", _small, false);
+            if (scrollHere)
+            {
+                _firstLine = Mathf.Clamp(_firstLine + (int)Mathf.Sign(e.delta.y) * 3, 0, Mathf.Max(0, _lines.Count - fit));
+                e.Use();
+            }
         }
 
         /// <summary>The table's collider bounds, projected to a GUI rectangle. False when it is off screen.</summary>
@@ -573,13 +641,21 @@ namespace GHCraftPad
             return area.width > 120f && area.height > 60f;
         }
 
-        /// <summary>Text with a shadow, so it reads on wood in any light. Bright when hovered.</summary>
+        /// <summary>
+        /// CHISELLED. His words: "the font imposed like chiselled into the rock". An engraved
+        /// letter is a groove: its upper-left wall is in shadow, its lower-right wall catches the
+        /// light, and the floor is darker than the surface. So: a dark copy up-left, a pale copy
+        /// down-right, and the letter itself in a dark, slightly transparent ink over the wood.
+        /// Hovered: the ink lightens, as if the groove were freshly cut.
+        /// </summary>
         private static void Print(Rect r, string text, GUIStyle style, bool bright)
         {
             Color old = GUI.color;
-            GUI.color = new Color(0f, 0f, 0f, 0.85f);
+            GUI.color = new Color(0f, 0f, 0f, 0.75f);
+            GUI.Label(new Rect(r.x - 1f, r.y - 1f, r.width, r.height), text, style);
+            GUI.color = new Color(1f, 0.95f, 0.85f, 0.55f);
             GUI.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), text, style);
-            GUI.color = bright ? Color.white : old;
+            GUI.color = bright ? new Color(0.55f, 0.45f, 0.35f, 1f) : new Color(0.16f, 0.11f, 0.07f, 0.92f);
             GUI.Label(r, text, style);
             GUI.color = old;
         }
@@ -611,12 +687,28 @@ namespace GHCraftPad
             _hover = new Texture2D(1, 1, TextureFormat.ARGB32, false);
             _hover.SetPixel(0, 0, new Color(1f, 1f, 1f, 0.08f)); _hover.Apply();
 
+            // A serif, bold, for the chisel: open-source faces first, then what Windows ships.
+            // Whichever is found is named in the log; none found = the skin's own font.
+            string[] faces = new string[] { "Linux Libertine O", "Liberation Serif", "DejaVu Serif", "Noto Serif", "Georgia", "Times New Roman" };
+            for (int i = 0; i < faces.Length && _chisel == null; i++)
+            {
+                try
+                {
+                    Font f = Font.CreateDynamicFontFromOSFont(faces[i], 16);
+                    if (f != null && f.fontNames != null && f.fontNames.Length > 0) { _chisel = f; Logger.LogInfo("chisel font: " + faces[i]); }
+                }
+                catch (Exception) { }
+            }
+
             _title = new GUIStyle(GUI.skin.label); _title.fontSize = 18; _title.fontStyle = FontStyle.Bold;
             _title.normal.textColor = new Color(0.96f, 0.97f, 1f);
-            _row = new GUIStyle(GUI.skin.label); _row.fontSize = 15; _row.alignment = TextAnchor.MiddleLeft;
-            _row.normal.textColor = new Color(0.92f, 0.93f, 0.95f);
-            _rowDim = new GUIStyle(_row); _rowDim.normal.textColor = new Color(0.55f, 0.57f, 0.62f);
-            _small = new GUIStyle(_row); _small.fontSize = 12; _small.normal.textColor = new Color(0.7f, 0.72f, 0.76f);
+            // The lines on the table: white text, coloured by GUI.color in Print() - the chisel.
+            _row = new GUIStyle(GUI.skin.label); _row.fontSize = 16; _row.fontStyle = FontStyle.Bold; _row.alignment = TextAnchor.MiddleLeft;
+            if (_chisel != null) _row.font = _chisel;
+            _row.normal.textColor = Color.white;
+            _rowDim = new GUIStyle(_row); _rowDim.normal.textColor = new Color(1f, 1f, 1f, 0.55f);
+            _head = new GUIStyle(_row); _head.fontSize = 17;
+            _small = new GUIStyle(_row); _small.fontSize = 12; _small.fontStyle = FontStyle.Normal; _small.normal.textColor = new Color(1f, 1f, 1f, 0.8f);
 
             _btn = new GUIStyle(GUI.skin.button); _btn.fontSize = 15; _btn.alignment = TextAnchor.MiddleLeft;
             _btn.normal.background = null; _btn.active.background = null; _btn.focused.background = null;
