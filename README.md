@@ -6,12 +6,12 @@ Green Hell's crafting table has no "choose a recipe" step: you drop items on it 
 they make, and everything has to be in your backpack first. Crafting at camp means walking to each
 box, taking things out, walking back.
 
-Open the crafting table and a pad appears beside it. It lists every recipe you know, and what you
-can make right now from three places counted together: what is already on the table, what is in your
-backpack, and what is in every storage box within a radius of you. Roll the mouse wheel over a
-recipe to choose how many; click it, and the ingredients are pulled onto the table — table first,
-then backpack, then the nearest boxes — and the game's own crafting starts. The game makes the item,
-exactly as if you had dragged the parts.
+Open the crafting table and the list is printed on the table itself — no window. It shows every
+recipe you know and what you can make right now from three places counted together: what is already
+on the table, what is in your backpack, and what is in every storage box within a radius of you. Roll
+the mouse wheel over a line to choose how many; click it, and the ingredients are brought onto the
+table — table first, then backpack, then the nearest boxes — with the count set. Then press the game's
+own Craft button. (`Pad.CraftAfterPull` starts the crafting by itself instead.)
 
 **Never a duplicate.** Every pull moves the same item out of its box and onto the table — never a
 copy. After every pull the mod counts that item across table, backpack and boxes and compares it
@@ -35,9 +35,11 @@ Needs [BepInEx 5](https://github.com/BepInEx/BepInEx) (x64). Drop `GHCraftPad.dl
 
 | | |
 |---|---|
-| `Pad.BoxRadiusMetres` | how far around you boxes count (default 15) — also a slider on the pad |
+| `Pad.BoxRadiusMetres` | how far around you boxes count (default 15) |
 | `Pad.ShowRecipesNotYetLearned` | list locked recipes greyed (default off) |
 | `Pad.CraftedItemToGroundIfNoRoom` | default on |
+| `Pad.CraftedItemGoesTo` | None (the game's way), Storage or Backpack |
+| `Pad.CraftAfterPull` | default off: a click only brings the parts |
 
 ## Build
 

@@ -46,20 +46,17 @@ namespace GHCraftPad
     {
         public const string Guid    = "com.mohammadkoush.ghcraftpad";
         public const string Name    = "GHCraftPad";
-        public const string Version = "1.1.0";
+        public const string Version = "2.0.0";
 
         private static GHCraftPadPlugin s_Self;
 
         private ConfigEntry<float>  _radius;
         private ConfigEntry<bool>   _showLocked;
         private ConfigEntry<bool>   _groundIfNoRoom;
-        private ConfigEntry<string> _padPos;
-        // Where a crafted item goes. His arrows: up = send to storage, down = send to backpack,
-        // neither = the game's own way (backpack, or the ground in front of you when it will not fit).
-        // Only one can be solid at a time; both can be outlines.
+        private ConfigEntry<bool>   _craftAfterPull;
+        // Where a crafted item goes: the game's own way, a storage box, or the backpack. Config
+        // only since 2.0.0 - the arrows went with the window.
         private ConfigEntry<string> _destination;      // "None" | "Storage" | "Backpack"
-        private Texture2D _upOutline, _upSolid, _downOutline, _downSolid;
-        private string _arrowHint = "";
 
         // ---- a recipe, as the pad sees it -------------------------------------------------------
         private class Line
@@ -82,8 +79,6 @@ namespace GHCraftPad
 
         // ---- pad ----------------------------------------------------------------------------------
         private bool _padOpen;
-        private Rect _rect = new Rect(60f, 120f, 520f, 640f);
-        private Vector2 _scroll;
         private GUIStyle _title, _row, _rowDim, _small, _btn, _btnDim;
         private bool _styled;
         private Texture2D _pixel, _hover;
@@ -101,12 +96,14 @@ namespace GHCraftPad
             _groundIfNoRoom = Config.Bind("Pad", "CraftedItemToGroundIfNoRoom", true,
                 "A crafted item that does not fit in your backpack is dropped on the ground in " +
                 "front of you. Off: the game's own behaviour, which leaves it on the table.");
-            _padPos = Config.Bind("Pad", "PadPosition", "", "Where the pad was last dragged. Written automatically.");
+            _craftAfterPull = Config.Bind("Pad", "CraftAfterPull", false,
+                "Off (his rule): clicking a recipe only brings its parts to the table, and the game's " +
+                "own Craft button makes the item with the count you dialled. On: the crafting starts " +
+                "by itself.");
             _destination = Config.Bind("Pad", "CraftedItemGoesTo", "None",
                 new ConfigDescription("Where a crafted item goes: Storage (the nearest box in range with " +
-                    "room), Backpack, or None for the game's own way. The two arrows on the pad set this.",
+                    "room), Backpack, or None for the game's own way.",
                     new AcceptableValueList<string>("None", "Storage", "Backpack")));
-            LoadPos();
 
             try
             {
@@ -415,13 +412,20 @@ namespace GHCraftPad
                     Logger.LogError("DUPLICATION CHECK FAILED: " + (Enums.ItemID)kv.Key + " was " + kv.Value + " across table+backpack+boxes, now " + a);
             }
 
-            // The game crafts. AddItem resets the wanted count to 1 each time, so it is set last.
+            // AddItem resets the wanted count to 1 each time, so it is set last; the game's own
+            // count buttons and Craft button then work with it. His rule: clicking brings the stuff
+            // to the table, nothing more - the game crafts when he presses Craft.
             cm.m_WantedResultsCount = n;
-            try { cm.StartCrafting(ln.Result, false); }
-            catch (Exception ex) { Logger.LogWarning("StartCrafting: " + ex.Message + " - the parts are on the table, press the game's craft button"); }
+            if (_craftAfterPull.Value)
+            {
+                try { cm.StartCrafting(ln.Result, false); }
+                catch (Exception ex) { Logger.LogWarning("StartCrafting: " + ex.Message + " - the parts are on the table, press the game's craft button"); }
+            }
 
-            Logger.LogInfo("pad: " + n + " x " + ln.Result + " - pulled " + pulledPack + " from the backpack, " + pulledBox + " from " + boxes.Count + " box(es)");
-            Say("Making " + n + " x " + Pretty(ln.Result) + (pulledBox > 0 ? " - " + pulledBox + " part(s) from your boxes" : ""));
+            Logger.LogInfo("pad: " + n + " x " + ln.Result + " - pulled " + pulledPack + " from the backpack, " + pulledBox + " from " + boxes.Count + " box(es)"
+                + (_craftAfterPull.Value ? ", crafting" : ", on the table"));
+            Say(n + " x " + Pretty(ln.Result) + " on the table" + (pulledBox > 0 ? " - " + pulledBox + " part(s) from your boxes" : "")
+                + (_craftAfterPull.Value ? "" : " - press Craft"));
             _linesAt = 0f;
         }
 
@@ -464,130 +468,120 @@ namespace GHCraftPad
                     GUI.Label(new Rect(r.x + 10f, r.y + 4f, sz.x, sz.y), c, _row);
                 }
                 if (!_padOpen) return;
-                _rect = GUI.Window(0x6A0D20, _rect, DrawPad, "");
+                DrawOnTable();
             }
             catch (Exception ex) { Logger.LogWarning("pad: " + ex.Message); }
         }
 
-        private void DrawPad(int id)
+        // -----------------------------------------------------------------------------------------
+        // PRINTED ON THE TABLE. His rule, 2026-09-19: "I don't want a separate window that opens
+        // when I want to craft something. It needs to be printed on the crafting table itself.
+        // Clicking on it brings the stuff to the table. No window opens, very simple."
+        //
+        // The table is CraftingManager.m_Table, seen through Inventory3DManager.m_Camera (the
+        // camera the crafting view renders with). Its collider's bounds are projected to the screen
+        // and the recipe lines are laid inside that rectangle, top down, plain text with a shadow:
+        // no box, no title, no drag. A row lights up under the mouse; the wheel over it dials how
+        // many; a click brings the parts. More lines than fit: the wheel over the header scrolls.
+        // -----------------------------------------------------------------------------------------
+        private int _firstLine;
+
+        private void DrawOnTable()
         {
-            GUI.DrawTexture(new Rect(0f, 0f, _rect.width, _rect.height), _pixel);
-            GUILayout.BeginVertical();
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Crafting pad", _title, GUILayout.ExpandWidth(true));
-            _arrowHint = "";
-            Arrow(true);
-            GUILayout.Space(6f);
-            Arrow(false);
-            GUILayout.EndHorizontal();
-            if (_arrowHint.Length > 0) GUILayout.Label(_arrowHint, _small);
-            else GUILayout.Label(_destination.Value == "Storage" ? "Crafted items go to the nearest box"
-                               : _destination.Value == "Backpack" ? "Crafted items go to your backpack"
-                               : "Crafted items go where the game puts them", _small);
-            GUILayout.Label(_boxesInRange + " box" + (_boxesInRange == 1 ? "" : "es") + " within "
-                            + Mathf.RoundToInt(_radius.Value) + " m   -   wheel: how many, click: make", _small);
+            CraftingManager cm = CraftingManager.Get();
+            if (cm == null || cm.m_Table == null) return;
+            Camera cam = null;
+            try { Inventory3DManager inv = Inventory3DManager.Get(); if (inv != null) cam = inv.m_Camera; } catch (Exception) { }
+            if (cam == null) cam = Camera.main;
+            if (cam == null) return;
 
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("  Boxes within", _small, GUILayout.Width(110f));
-            float rv = GUILayout.HorizontalSlider(_radius.Value, 3f, 100f);
-            if (Mathf.Abs(rv - _radius.Value) > 0.01f) { _radius.Value = rv; _linesAt = 0f; }
-            GUILayout.Label(Mathf.RoundToInt(_radius.Value) + " m", _small, GUILayout.Width(50f));
-            GUILayout.EndHorizontal();
-            GUILayout.Space(6f);
+            Rect area;
+            if (!TableOnScreen(cm, cam, out area)) return;
 
-            _scroll = GUILayout.BeginScrollView(_scroll, false, true);
-            if (_lines.Count == 0) GUILayout.Label("Nothing to list yet.", _rowDim);
-            for (int i = 0; i < _lines.Count; i++)
+            const float rowH = 26f;
+            Event e = Event.current;
+            bool overArea = area.Contains(e.mousePosition);
+
+            // Header line: what the wheel and the click do, and how many boxes are in reach.
+            Rect head = new Rect(area.x, area.y, area.width, rowH);
+            Print(head, _boxesInRange + " box" + (_boxesInRange == 1 ? "" : "es") + " in reach   -   wheel: how many, click: bring to the table", _small, false);
+            if (e.type == EventType.ScrollWheel && head.Contains(e.mousePosition))
+            {
+                _firstLine = Mathf.Clamp(_firstLine + (int)Mathf.Sign(e.delta.y), 0, Mathf.Max(0, _lines.Count - 1));
+                e.Use();
+            }
+
+            int fit = Mathf.Max(1, (int)((area.height - rowH) / rowH));
+            if (_lines.Count == 0)
+            {
+                Print(new Rect(area.x, area.y + rowH, area.width, rowH), "Nothing to make from what is in reach.", _rowDim, false);
+                return;
+            }
+            _firstLine = Mathf.Clamp(_firstLine, 0, Mathf.Max(0, _lines.Count - fit));
+            float y = area.y + rowH;
+            for (int i = _firstLine; i < _lines.Count && i < _firstLine + fit; i++, y += rowH)
             {
                 Line ln = _lines[i];
                 bool can = ln.CanMake > 0;
                 string right = can ? (ln.Count + " of " + ln.CanMake) : ("need " + ln.Missing);
-                string text = "  " + ln.Label + "    " + right + (can && ln.FromBoxes > 0 ? "   (" + ln.FromBoxes + " from boxes)" : "");
-                bool clicked = GUILayout.Button(text, can ? _btn : _btnDim, GUILayout.Height(30f));
-                Rect rr = GUILayoutUtility.GetLastRect();
+                string text = ln.Label + "    " + right + (can && ln.FromBoxes > 0 ? "   (" + ln.FromBoxes + " from boxes)" : "");
+                Rect rr = new Rect(area.x, y, area.width, rowH);
+                bool hover = rr.Contains(e.mousePosition);
+                if (hover && e.type == EventType.Repaint) GUI.DrawTexture(rr, _hover);
+                Print(rr, text, can ? _row : _rowDim, hover);
 
-                // The wheel over a row dials how many. ScrollWheel arrives as its own event.
-                Event e = Event.current;
-                if (can && e.type == EventType.ScrollWheel && rr.Contains(e.mousePosition))
+                if (can && hover && e.type == EventType.ScrollWheel)
                 {
                     ln.Count = Mathf.Clamp(ln.Count - (int)Mathf.Sign(e.delta.y), 1, ln.CanMake);
                     e.Use();
                 }
-                if (clicked && can)
+                if (can && hover && e.type == EventType.MouseUp && e.button == 0)
                 {
+                    e.Use();
                     try { PullAndCraft(ln); }
                     catch (Exception ex) { Logger.LogWarning("pull: " + ex.Message); Say("Could not pull - see the log"); }
                 }
             }
-            GUILayout.EndScrollView();
-            GUILayout.Label("Borrowed parts go back to their box if you close the table without crafting.", _small);
-            GUILayout.EndVertical();
-
-            GUI.DragWindow(new Rect(0f, 0f, _rect.width, 28f));
-            string v = Mathf.RoundToInt(_rect.x) + "," + Mathf.RoundToInt(_rect.y);
-            if (v != _padPos.Value) _padPos.Value = v;
+            if (_firstLine + fit < _lines.Count)
+                Print(new Rect(area.x, y, area.width, rowH), "... " + (_lines.Count - _firstLine - fit) + " more (wheel over the top line)", _small, false);
         }
 
-        /// <summary>
-        /// One arrow. Outline when off, solid when on; only one of the two can be solid, both can be
-        /// outlines; clicking a solid one makes it an outline again. Hovering names what it does.
-        /// </summary>
-        private void Arrow(bool up)
+        /// <summary>The table's collider bounds, projected to a GUI rectangle. False when it is off screen.</summary>
+        private static bool TableOnScreen(CraftingManager cm, Camera cam, out Rect area)
         {
-            string mode = up ? "Storage" : "Backpack";
-            bool on = _destination.Value == mode;
-            Texture2D tex = up ? (on ? _upSolid : _upOutline) : (on ? _downSolid : _downOutline);
-            Rect r = GUILayoutUtility.GetRect(30f, 30f, GUILayout.Width(30f), GUILayout.Height(30f));
-            bool hover = r.Contains(Event.current.mousePosition);
-            if (hover) _arrowHint = up ? "Send crafted items to storage" : "Send crafted items to backpack";
-            if (Event.current.type == EventType.Repaint)
+            area = new Rect();
+            Bounds b;
+            if (cm.m_TableCollider != null) b = cm.m_TableCollider.bounds;
+            else b = new Bounds(cm.m_Table.transform.position, new Vector3(1.2f, 0.2f, 0.8f));
+            float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
+            int behind = 0;
+            for (int k = 0; k < 8; k++)
             {
-                if (hover) GUI.DrawTexture(r, _hover);
-                GUI.DrawTexture(r, tex, ScaleMode.ScaleToFit, true);
+                Vector3 c = new Vector3((k & 1) == 0 ? b.min.x : b.max.x, (k & 2) == 0 ? b.min.y : b.max.y, (k & 4) == 0 ? b.min.z : b.max.z);
+                Vector3 sp = cam.WorldToScreenPoint(c);
+                if (sp.z <= 0f) { behind++; continue; }
+                float gx = sp.x, gy = Screen.height - sp.y;
+                if (gx < minX) minX = gx; if (gx > maxX) maxX = gx;
+                if (gy < minY) minY = gy; if (gy > maxY) maxY = gy;
             }
-            if (Event.current.type == EventType.MouseUp && hover)
-            {
-                _destination.Value = on ? "None" : mode;            // on -> off; off -> on, and the other goes off
-                Logger.LogInfo("pad: crafted items go to " + _destination.Value);
-                Event.current.Use();
-            }
+            if (behind == 8 || maxX <= minX || maxY <= minY) return false;
+            // Inset a little so the text sits on the wood, not on its edge; never wider than the screen.
+            float inX = (maxX - minX) * 0.06f, inY = (maxY - minY) * 0.06f;
+            area = new Rect(minX + inX, minY + inY, maxX - minX - 2f * inX, maxY - minY - 2f * inY);
+            area.xMin = Mathf.Max(area.xMin, 0f); area.xMax = Mathf.Min(area.xMax, Screen.width);
+            area.yMin = Mathf.Max(area.yMin, 0f); area.yMax = Mathf.Min(area.yMax, Screen.height);
+            return area.width > 120f && area.height > 60f;
         }
 
-        /// <summary>An up or down arrow, 32 px, as an outline or a solid. Drawn, not a font glyph.</summary>
-        private static Texture2D ArrowTex(bool up, bool solid)
+        /// <summary>Text with a shadow, so it reads on wood in any light. Bright when hovered.</summary>
+        private static void Print(Rect r, string text, GUIStyle style, bool bright)
         {
-            const int S = 32;
-            Texture2D t = new Texture2D(S, S, TextureFormat.ARGB32, false);
-            Color ink = new Color(0.85f, 0.87f, 0.92f, 1f);
-            Color none = new Color(0f, 0f, 0f, 0f);
-            for (int y = 0; y < S; y++)
-                for (int x = 0; x < S; x++)
-                {
-                    // Texture rows go bottom-up; flip so "up" points up on screen.
-                    int yy = up ? (S - 1 - y) : y;
-                    bool inHead = yy < 16 && Mathf.Abs(x - 15.5f) <= (yy + 1) * 0.95f;
-                    bool inShaft = yy >= 16 && yy < 29 && Mathf.Abs(x - 15.5f) <= 4.5f;
-                    bool inside = inHead || inShaft;
-                    bool px;
-                    if (solid) px = inside;
-                    else
-                    {
-                        // An outline: inside, but with a neighbour that is outside.
-                        px = false;
-                        if (inside)
-                            for (int dy = -2; dy <= 2 && !px; dy++)
-                                for (int dx = -2; dx <= 2 && !px; dx++)
-                                {
-                                    int nx = x + dx, ny = yy + dy;
-                                    bool nHead = ny < 16 && Mathf.Abs(nx - 15.5f) <= (ny + 1) * 0.95f;
-                                    bool nShaft = ny >= 16 && ny < 29 && Mathf.Abs(nx - 15.5f) <= 4.5f;
-                                    if (ny < 0 || ny >= S || nx < 0 || nx >= S || !(nHead || nShaft)) px = true;
-                                }
-                    }
-                    t.SetPixel(x, y, px ? ink : none);
-                }
-            t.Apply();
-            return t;
+            Color old = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.85f);
+            GUI.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), text, style);
+            GUI.color = bright ? Color.white : old;
+            GUI.Label(r, text, style);
+            GUI.color = old;
         }
 
         private void Say(string text)
@@ -616,8 +610,6 @@ namespace GHCraftPad
             _pixel.SetPixel(0, 0, new Color(0.06f, 0.07f, 0.10f, 0.92f)); _pixel.Apply();
             _hover = new Texture2D(1, 1, TextureFormat.ARGB32, false);
             _hover.SetPixel(0, 0, new Color(1f, 1f, 1f, 0.08f)); _hover.Apply();
-            _upOutline = ArrowTex(true, false);  _upSolid = ArrowTex(true, true);
-            _downOutline = ArrowTex(false, false); _downSolid = ArrowTex(false, true);
 
             _title = new GUIStyle(GUI.skin.label); _title.fontSize = 18; _title.fontStyle = FontStyle.Bold;
             _title.normal.textColor = new Color(0.96f, 0.97f, 1f);
@@ -635,14 +627,5 @@ namespace GHCraftPad
             _btnDim.hover.textColor = _rowDim.normal.textColor;
         }
 
-        private void LoadPos()
-        {
-            try
-            {
-                string[] p = (_padPos.Value ?? "").Split(',');
-                if (p.Length == 2) { float x, y; if (float.TryParse(p[0], out x) && float.TryParse(p[1], out y)) { _rect.x = x; _rect.y = y; } }
-            }
-            catch (Exception) { }
-        }
     }
 }
