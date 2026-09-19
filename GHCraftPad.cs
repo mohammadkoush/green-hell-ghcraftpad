@@ -46,7 +46,7 @@ namespace GHCraftPad
     {
         public const string Guid    = "com.mohammadkoush.ghcraftpad";
         public const string Name    = "GHCraftPad";
-        public const string Version = "2.3.0";
+        public const string Version = "2.3.1";
 
         private static GHCraftPadPlugin s_Self;
 
@@ -285,6 +285,33 @@ namespace GHCraftPad
             catch (Exception ex) { Logger.LogWarning("send to storage: " + ex.Message); return false; }
         }
 
+        private void ClearTableExcept(CraftingManager cm, InventoryBackpack bp, Dictionary<int, int> keep)
+        {
+            if (cm.m_Items == null || cm.m_Items.Count == 0) return;
+            int home = 0, back = 0, dropped = 0;
+            List<Item> onTable = new List<Item>(cm.m_Items);
+            for (int i = 0; i < onTable.Count; i++)
+            {
+                Item it = onTable[i];
+                if (it == null || it.m_Info == null) continue;
+                if (keep != null && keep.ContainsKey((int)it.m_Info.m_ID)) continue;    // the new recipe wants it
+                cm.RemoveItem(it, false, false);
+                Storage box;
+                if (_borrowed.TryGetValue(it, out box) && box != null)
+                {
+                    _borrowed.Remove(it);
+                    if (box.InsertItem(it, null, null, false, true, false) == InsertResult.Ok) { home++; continue; }
+                    dropped++;
+                    continue;
+                }
+                InsertResult r = bp.InsertItem(it, null, null, true, true, true, true, true);
+                if (r == InsertResult.Ok) back++; else dropped++;
+            }
+            if (home + back + dropped > 0)
+                Logger.LogInfo("table cleared for the next recipe: " + back + " to the backpack, " + home + " back to their boxes"
+                               + (dropped > 0 ? ", " + dropped + " had no room and lie beside the table" : ""));
+        }
+
         private void ReturnBorrowed(CraftingManager cm)
         {
             if (_borrowed.Count == 0) return;
@@ -459,6 +486,14 @@ namespace GHCraftPad
 
             // Conservation, before.
             Dictionary<int, int> before = Census(cm, bp, boxes);
+
+            // A CLEAN TABLE FIRST. His glitch: "if I change my mind and want to build something
+            // else, the table needs to clear out first. Bringing two recipes will stop the
+            // crafting." The game's CheckResult matches the WHOLE table against a recipe, so a
+            // stray part from the last click blanks the result. Anything on the table that the
+            // new recipe does not want goes home first: borrowed parts to their box, the rest to
+            // the backpack - the same move closing the table makes.
+            ClearTableExcept(cm, bp, ln.Need);
 
             int pulledPack = 0, pulledBox = 0;
             foreach (KeyValuePair<int, int> c in ln.Need)
