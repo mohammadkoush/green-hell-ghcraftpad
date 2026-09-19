@@ -46,7 +46,7 @@ namespace GHCraftPad
     {
         public const string Guid    = "com.mohammadkoush.ghcraftpad";
         public const string Name    = "GHCraftPad";
-        public const string Version = "2.1.0";
+        public const string Version = "2.2.0";
 
         private static GHCraftPadPlugin s_Self;
 
@@ -54,6 +54,11 @@ namespace GHCraftPad
         private ConfigEntry<bool>   _showLocked;
         private ConfigEntry<bool>   _groundIfNoRoom;
         private ConfigEntry<bool>   _craftAfterPull;
+        private ConfigEntry<string> _listPos;
+        private ConfigEntry<int>    _fontSize;
+        private ConfigEntry<bool>   _magnify;
+        private ConfigEntry<float>  _magnifyScale;
+        private ConfigEntry<float>  _magnifyRadius;
         // Where a crafted item goes: the game's own way, a storage box, or the backpack. Config
         // only since 2.0.0 - the arrows went with the window.
         private ConfigEntry<string> _destination;      // "None" | "Storage" | "Backpack"
@@ -125,6 +130,21 @@ namespace GHCraftPad
             _groundIfNoRoom = Config.Bind("Pad", "CraftedItemToGroundIfNoRoom", true,
                 "A crafted item that does not fit in your backpack is dropped on the ground in " +
                 "front of you. Off: the game's own behaviour, which leaves it on the table.");
+            _listPos = Config.Bind("Look", "ListPosition", "",
+                "Where the list sits, as a fraction of the screen (x,y). Drag its top line to move it; " +
+                "written automatically. Empty = over the table.");
+            _fontSize = Config.Bind("Look", "FontSize", 16,
+                new ConfigDescription("The letters' size. Ctrl + wheel over the list changes it.",
+                    new AcceptableValueRange<int>(8, 40)));
+            _magnify = Config.Bind("Look", "Magnify", true,
+                "Lines swell as the mouse nears them and shrink as it leaves, like the icons on a Mac " +
+                "dock - his standard for every panel.");
+            _magnifyScale = Config.Bind("Look", "MagnifyScale", 1.6f,
+                new ConfigDescription("How big a line gets right under the mouse, as a multiple.",
+                    new AcceptableValueRange<float>(1f, 3f)));
+            _magnifyRadius = Config.Bind("Look", "MagnifyRadiusPixels", 90f,
+                new ConfigDescription("How far from the mouse the swelling reaches.",
+                    new AcceptableValueRange<float>(20f, 400f)));
             _craftAfterPull = Config.Bind("Pad", "CraftAfterPull", false,
                 "Off (his rule): clicking a recipe only brings its parts to the table, and the game's " +
                 "own Craft button makes the item with the count you dialled. On: the crafting starts " +
@@ -546,6 +566,58 @@ namespace GHCraftPad
         // many; a click brings the parts. More lines than fit: the wheel over the header scrolls.
         // -----------------------------------------------------------------------------------------
         private int _firstLine;
+        private bool _drag;
+        private Vector2 _dragOff;
+
+        // -----------------------------------------------------------------------------------------
+        // WHERE, HOW BIG, AND THE DOCK. His asks, 2026-09-19, with a screenshot of the letters
+        // sitting small in a corner of a huge projected slab:
+        //   "Give me the option to customize the location and size of the font. Add some
+        //    customization tools, moving, resizing. Like hover makes the font bigger - the Mac icon
+        //    bar magnification. Make it a rule: the systematic increase and decrease of the font
+        //    based on how far the mouse is from the font."
+        // So: the list starts over the table's centre; its top line is a handle - drag it anywhere
+        // and the place is kept in the cfg as a fraction of the screen. Ctrl + wheel sets the
+        // letter size. And every line is drawn at a scale that rises smoothly as the mouse nears
+        // it: a raised cosine of the distance, so the swell has no edge, and the lines below shift
+        // down to make room exactly as the dock's icons do.
+        // -----------------------------------------------------------------------------------------
+
+        private Vector2 ListOrigin(CraftingManager cm, Camera cam)
+        {
+            try
+            {
+                string[] p = (_listPos.Value ?? "").Split(',');
+                if (p.Length == 2)
+                {
+                    float fx, fy;
+                    if (float.TryParse(p[0], out fx) && float.TryParse(p[1], out fy))
+                        return new Vector2(Mathf.Clamp01(fx) * Screen.width, Mathf.Clamp01(fy) * Screen.height);
+                }
+            }
+            catch (Exception) { }
+            // Default: the table's centre on screen, a little up and left so the list hangs over it.
+            Vector3 sp = cam.WorldToScreenPoint(cm.m_Table.transform.position);
+            if (sp.z > 0f) return new Vector2(Mathf.Clamp(sp.x - Screen.width * 0.12f, 0f, Screen.width * 0.7f),
+                                              Mathf.Clamp(Screen.height - sp.y - Screen.height * 0.25f, 0f, Screen.height * 0.6f));
+            return new Vector2(Screen.width * 0.12f, Screen.height * 0.12f);
+        }
+
+        private void SaveOrigin(Vector2 o)
+        {
+            string v = (o.x / Screen.width).ToString("F3") + "," + (o.y / Screen.height).ToString("F3");
+            if (v != _listPos.Value) _listPos.Value = v;
+        }
+
+        /// <summary>1 at the mouse, falling to 1 at the edge of the radius by a raised cosine: no edge, no snap.</summary>
+        private float Swell(float dist)
+        {
+            if (!_magnify.Value) return 1f;
+            float r = _magnifyRadius.Value;
+            if (dist >= r) return 1f;
+            float t = 0.5f * (1f + Mathf.Cos(Mathf.PI * dist / r));
+            return 1f + (_magnifyScale.Value - 1f) * t;
+        }
 
         private void DrawOnTable()
         {
@@ -556,57 +628,87 @@ namespace GHCraftPad
             if (cam == null) cam = Camera.main;
             if (cam == null) return;
 
-            Rect area;
-            if (!TableOnScreen(cm, cam, out area)) return;
-
-            const float rowH = 26f;
             Event e = Event.current;
-            bool overArea = area.Contains(e.mousePosition);
+            Vector2 origin = ListOrigin(cm, cam);
+            int baseSize = _fontSize.Value;
+            float rowH = baseSize * 1.55f;
+            float width = Mathf.Min(Screen.width - origin.x, Mathf.Max(360f, baseSize * 34f));
 
-            // Header line: what the wheel and the click do, and how many boxes are in reach.
-            Rect head = new Rect(area.x, area.y, area.width, rowH);
-            Print(head, _boxesInRange + " box" + (_boxesInRange == 1 ? "" : "es") + " in reach   -   wheel on a line: how many, click: bring to the table, wheel on a heading: scroll", _small, false);
-            bool scrollHere = e.type == EventType.ScrollWheel && (head.Contains(e.mousePosition) || e.shift);
+            // The handle line: drag to move; it also says what the mouse does.
+            Rect head = new Rect(origin.x, origin.y, width, rowH);
+            _small.fontSize = Mathf.Max(9, (int)(baseSize * 0.75f));
+            Print(head, "::  " + _boxesInRange + " box" + (_boxesInRange == 1 ? "" : "es") + " in reach   -   drag me;  wheel: how many;  click: to the table;  Ctrl+wheel: size;  wheel on a heading: scroll", _small, head.Contains(e.mousePosition));
+            if (e.type == EventType.MouseDown && e.button == 0 && head.Contains(e.mousePosition)) { _drag = true; _dragOff = e.mousePosition - origin; e.Use(); }
+            if (_drag && e.type == EventType.MouseDrag) { origin = e.mousePosition - _dragOff; SaveOrigin(origin); e.Use(); }
+            if (_drag && (e.type == EventType.MouseUp || e.rawType == EventType.MouseUp)) { _drag = false; e.Use(); }
 
-            int fit = Mathf.Max(1, (int)((area.height - rowH) / rowH));
-            if (_lines.Count == 0)
+            // The list's whole rectangle, for Ctrl + wheel and for the dock's reach.
+            Rect list = new Rect(origin.x, origin.y, width, Screen.height - origin.y);
+            bool overList = list.Contains(e.mousePosition);
+            if (e.type == EventType.ScrollWheel && e.control && overList)
             {
-                Print(new Rect(area.x, area.y + rowH, area.width, rowH), "Nothing to make from what is in reach.", _rowDim, false);
+                _fontSize.Value = Mathf.Clamp(_fontSize.Value - (int)Mathf.Sign(e.delta.y), 8, 40);
+                e.Use();
                 return;
             }
+            bool scrollHere = e.type == EventType.ScrollWheel && !e.control && (head.Contains(e.mousePosition) || (e.shift && overList));
+
+            if (_lines.Count == 0)
+            {
+                _rowDim.fontSize = baseSize;
+                Print(new Rect(origin.x, origin.y + rowH, width, rowH), "Nothing to make from what is in reach.", _rowDim, false);
+                return;
+            }
+
+            // How many fit at rest, and the dock: each visible line's swell from the mouse's distance
+            // to where the line would sit at rest, then laid out one under the other at its own size.
+            int fit = Mathf.Max(1, (int)((Screen.height - origin.y - 2f * rowH) / rowH));
             _firstLine = Mathf.Clamp(_firstLine, 0, Mathf.Max(0, _lines.Count - fit));
-            float y = area.y + rowH;
-            for (int i = _firstLine; i < _lines.Count && i < _firstLine + fit; i++, y += rowH)
+            float y = origin.y + rowH;
+            float restY = y;
+            int shown = 0;
+            for (int i = _firstLine; i < _lines.Count && shown < fit; i++, shown++, restY += rowH)
             {
                 Line ln = _lines[i];
-                Rect rr = new Rect(area.x, y, area.width, rowH);
+                float sc = 1f;
+                if (overList) sc = Swell(Mathf.Abs(e.mousePosition.y - (restY + rowH * 0.5f)));
+                float h = rowH * sc;
+                if (y + h > Screen.height) break;
+                Rect rr = new Rect(origin.x, y, width, h);
                 bool hover = rr.Contains(e.mousePosition);
+                int size = Mathf.RoundToInt(baseSize * sc);
                 if (ln.Header)
                 {
+                    _head.fontSize = size + 1;
                     Print(rr, ln.Label, _head, false);
-                    if (hover && e.type == EventType.ScrollWheel) scrollHere = true;
+                    if (hover && e.type == EventType.ScrollWheel && !e.control) scrollHere = true;
+                    y += h;
                     continue;
                 }
                 bool can = ln.CanMake > 0;
                 string right = can ? (ln.Count + " of " + ln.CanMake) : ("need " + ln.Missing);
                 string text = "    " + ln.Label + "    " + right + (can && ln.FromBoxes > 0 ? "   (" + ln.FromBoxes + " from boxes)" : "");
+                GUIStyle st = can ? _row : _rowDim;
+                st.fontSize = size;
                 if (hover && e.type == EventType.Repaint) GUI.DrawTexture(rr, _hover);
-                Print(rr, text, can ? _row : _rowDim, hover);
+                Print(rr, text, st, hover);
 
-                if (can && hover && e.type == EventType.ScrollWheel)
+                if (can && hover && e.type == EventType.ScrollWheel && !e.control && !e.shift)
                 {
                     ln.Count = Mathf.Clamp(ln.Count - (int)Mathf.Sign(e.delta.y), 1, ln.CanMake);
                     e.Use();
                 }
-                if (can && hover && e.type == EventType.MouseUp && e.button == 0)
+                if (can && hover && e.type == EventType.MouseUp && e.button == 0 && !_drag)
                 {
                     e.Use();
                     try { PullAndCraft(ln); }
                     catch (Exception ex) { Logger.LogWarning("pull: " + ex.Message); Say("Could not pull - see the log"); }
                 }
+                y += h;
             }
-            if (_firstLine + fit < _lines.Count)
-                Print(new Rect(area.x, y, area.width, rowH), "... " + (_lines.Count - _firstLine - fit) + " more (wheel over a heading)", _small, false);
+            _row.fontSize = baseSize; _rowDim.fontSize = baseSize; _head.fontSize = baseSize + 1;
+            if (_firstLine + shown < _lines.Count)
+                Print(new Rect(origin.x, y, width, rowH), "... " + (_lines.Count - _firstLine - shown) + " more (wheel over a heading, or Shift + wheel)", _small, false);
             if (scrollHere)
             {
                 _firstLine = Mathf.Clamp(_firstLine + (int)Mathf.Sign(e.delta.y) * 3, 0, Mathf.Max(0, _lines.Count - fit));
