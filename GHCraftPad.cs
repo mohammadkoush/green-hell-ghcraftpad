@@ -46,7 +46,7 @@ namespace GHCraftPad
     {
         public const string Guid    = "com.mohammadkoush.ghcraftpad";
         public const string Name    = "GHCraftPad";
-        public const string Version = "2.2.0";
+        public const string Version = "2.3.0";
 
         private static GHCraftPadPlugin s_Self;
 
@@ -75,6 +75,34 @@ namespace GHCraftPad
             public int Count = 1;                  // what the wheel dialled
             public int Cat;                        // index into Cats
             public bool Header;                    // a category line, not a recipe
+            public int InCat, MadeInCat;           // header only: how many under it, how many makeable
+        }
+
+        // ONE CATEGORY OPEN AT A TIME. His words: "put all the recipes under the categories, and
+        // clicking one category collapses any other open category" - the whole list ran off the
+        // screen. -1 = all folded, which is how the table opens.
+        private int _openCat = -1;
+
+        // SMOOTH, NOT JUMPY - his words. Two jumps were in 2.2.0: the swell switched on only when the
+        // mouse entered the list's rectangle (gone: it is distance now), and the lines were rebuilt
+        // every 1.5 s, which threw their sizes away. So each line's scale is remembered by what it
+        // is (its item, or its category) and eased toward the target every repaint.
+        private readonly Dictionary<int, float> _scaleMemo = new Dictionary<int, float>();
+        private float _lastRepaint;
+
+        private float Eased(Line ln, float target)
+        {
+            int key = ln.Header ? -(ln.Cat + 1) : (int)ln.Result;
+            float cur;
+            if (!_scaleMemo.TryGetValue(key, out cur)) cur = target;
+            if (Event.current.type == EventType.Repaint)
+            {
+                float dt = Mathf.Clamp(Time.realtimeSinceStartup - _lastRepaint, 0f, 0.1f);
+                cur = Mathf.Lerp(cur, target, 1f - Mathf.Exp(-dt * 18f));
+                if (Mathf.Abs(cur - target) < 0.004f) cur = target;
+                _scaleMemo[key] = cur;
+            }
+            return cur;
         }
 
         // The categories, in the order they are printed. From ItemInfo.m_Type, the game's own.
@@ -406,10 +434,11 @@ namespace GHCraftPad
             {
                 if (_lines[i].Cat == lastCat) continue;
                 lastCat = _lines[i].Cat;
-                int made = 0; for (int k = i; k < _lines.Count && _lines[k].Cat == lastCat; k++) if (_lines[k].CanMake > 0) made++;
+                int made = 0, total = 0;
+                for (int k = i; k < _lines.Count && _lines[k].Cat == lastCat; k++) { total++; if (_lines[k].CanMake > 0) made++; }
                 Line h = new Line();
-                h.Header = true; h.Cat = lastCat;
-                h.Label = Cats[lastCat].ToUpperInvariant() + (made > 0 ? "   (" + made + " you can make)" : "");
+                h.Header = true; h.Cat = lastCat; h.InCat = total; h.MadeInCat = made;
+                h.Label = Cats[lastCat].ToUpperInvariant();
                 _lines.Insert(i, h);
                 i++;
             }
@@ -637,7 +666,7 @@ namespace GHCraftPad
             // The handle line: drag to move; it also says what the mouse does.
             Rect head = new Rect(origin.x, origin.y, width, rowH);
             _small.fontSize = Mathf.Max(9, (int)(baseSize * 0.75f));
-            Print(head, "::  " + _boxesInRange + " box" + (_boxesInRange == 1 ? "" : "es") + " in reach   -   drag me;  wheel: how many;  click: to the table;  Ctrl+wheel: size;  wheel on a heading: scroll", _small, head.Contains(e.mousePosition));
+            Print(head, "::  " + _boxesInRange + " box" + (_boxesInRange == 1 ? "" : "es") + " in reach   -   drag me;  click a heading to open it;  wheel: how many;  click: to the table;  Ctrl+wheel: size", _small, head.Contains(e.mousePosition));
             if (e.type == EventType.MouseDown && e.button == 0 && head.Contains(e.mousePosition)) { _drag = true; _dragOff = e.mousePosition - origin; e.Use(); }
             if (_drag && e.type == EventType.MouseDrag) { origin = e.mousePosition - _dragOff; SaveOrigin(origin); e.Use(); }
             if (_drag && (e.type == EventType.MouseUp || e.rawType == EventType.MouseUp)) { _drag = false; e.Use(); }
@@ -660,18 +689,28 @@ namespace GHCraftPad
                 return;
             }
 
+            // What is on show: every heading, and the recipes of the open category only.
+            List<Line> show = new List<Line>();
+            for (int i = 0; i < _lines.Count; i++)
+                if (_lines[i].Header || _lines[i].Cat == _openCat) show.Add(_lines[i]);
+
             // How many fit at rest, and the dock: each visible line's swell from the mouse's distance
-            // to where the line would sit at rest, then laid out one under the other at its own size.
+            // to where the line would sit at rest - the distance to the LINE, not "is the mouse over
+            // it": straight down from the row's centre, plus how far the mouse is beyond the text's
+            // end, so the swell follows the pointer in from any side and fades on any side. Then the
+            // lines are laid one under the other at their own sizes.
             int fit = Mathf.Max(1, (int)((Screen.height - origin.y - 2f * rowH) / rowH));
-            _firstLine = Mathf.Clamp(_firstLine, 0, Mathf.Max(0, _lines.Count - fit));
+            _firstLine = Mathf.Clamp(_firstLine, 0, Mathf.Max(0, show.Count - fit));
             float y = origin.y + rowH;
             float restY = y;
             int shown = 0;
-            for (int i = _firstLine; i < _lines.Count && shown < fit; i++, shown++, restY += rowH)
+            for (int i = _firstLine; i < show.Count && shown < fit; i++, shown++, restY += rowH)
             {
-                Line ln = _lines[i];
-                float sc = 1f;
-                if (overList) sc = Swell(Mathf.Abs(e.mousePosition.y - (restY + rowH * 0.5f)));
+                Line ln = show[i];
+                float textW = ln.Header ? baseSize * 14f : Mathf.Min(width, baseSize * 0.55f * (ln.Label.Length + 14));
+                float dx = Mathf.Max(0f, Mathf.Max(origin.x - e.mousePosition.x, e.mousePosition.x - (origin.x + textW)));
+                float dy = e.mousePosition.y - (restY + rowH * 0.5f);
+                float sc = Eased(ln, Swell(Mathf.Sqrt(dx * dx + dy * dy)));
                 float h = rowH * sc;
                 if (y + h > Screen.height) break;
                 Rect rr = new Rect(origin.x, y, width, h);
@@ -679,9 +718,18 @@ namespace GHCraftPad
                 int size = Mathf.RoundToInt(baseSize * sc);
                 if (ln.Header)
                 {
+                    bool open = ln.Cat == _openCat;
                     _head.fontSize = size + 1;
-                    Print(rr, ln.Label, _head, false);
+                    string hl = ln.Label + (open ? "" : "   (" + ln.InCat + (ln.MadeInCat > 0 ? ", " + ln.MadeInCat + " you can make" : "") + ")");
+                    if (hover && e.type == EventType.Repaint) GUI.DrawTexture(rr, _hover);
+                    Print(rr, hl, _head, hover);
                     if (hover && e.type == EventType.ScrollWheel && !e.control) scrollHere = true;
+                    if (hover && e.type == EventType.MouseUp && e.button == 0 && !_drag)
+                    {
+                        _openCat = open ? -1 : ln.Cat;       // one open at a time
+                        _firstLine = 0;
+                        e.Use();
+                    }
                     y += h;
                     continue;
                 }
@@ -707,11 +755,12 @@ namespace GHCraftPad
                 y += h;
             }
             _row.fontSize = baseSize; _rowDim.fontSize = baseSize; _head.fontSize = baseSize + 1;
-            if (_firstLine + shown < _lines.Count)
-                Print(new Rect(origin.x, y, width, rowH), "... " + (_lines.Count - _firstLine - shown) + " more (wheel over a heading, or Shift + wheel)", _small, false);
+            if (e.type == EventType.Repaint) _lastRepaint = Time.realtimeSinceStartup;
+            if (_firstLine + shown < show.Count)
+                Print(new Rect(origin.x, y, width, rowH), "... " + (show.Count - _firstLine - shown) + " more (wheel over a heading, or Shift + wheel)", _small, false);
             if (scrollHere)
             {
-                _firstLine = Mathf.Clamp(_firstLine + (int)Mathf.Sign(e.delta.y) * 3, 0, Mathf.Max(0, _lines.Count - fit));
+                _firstLine = Mathf.Clamp(_firstLine + (int)Mathf.Sign(e.delta.y) * 3, 0, Mathf.Max(0, show.Count - fit));
                 e.Use();
             }
         }
