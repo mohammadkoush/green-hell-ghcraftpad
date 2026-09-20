@@ -46,7 +46,7 @@ namespace GHCraftPad
     {
         public const string Guid    = "com.mohammadkoush.ghcraftpad";
         public const string Name    = "GHCraftPad";
-        public const string Version = "2.6.0";
+        public const string Version = "2.7.0";
 
         private static GHCraftPadPlugin s_Self;
 
@@ -60,6 +60,8 @@ namespace GHCraftPad
         private ConfigEntry<float>  _magnifyScale;
         private ConfigEntry<float>  _magnifyRadius;
         private ConfigEntry<int>    _maxLines;
+        private ConfigEntry<string> _fontName;
+        private bool _twig;
         // Where a crafted item goes: the game's own way, a storage box, or the backpack. Config
         // only since 2.0.0 - the arrows went with the window.
         private ConfigEntry<string> _destination;      // "None" | "Storage" | "Backpack"
@@ -174,6 +176,14 @@ namespace GHCraftPad
             _magnifyRadius = Config.Bind("Look", "MagnifyRadiusPixels", 90f,
                 new ConfigDescription("How far from the mouse the swelling reaches.",
                     new AcceptableValueRange<float>(20f, 400f)));
+            // HIS ASK: "replace the engraving with a font that uses twigs - coherent with the game."
+            // The mod ships no font (a twig font he liked is free for personal use only, and this
+            // repository is public); it uses one INSTALLED on the machine, by name. With the named
+            // font present the lines are drawn as pale twigs with a shadow; without it, the
+            // chiselled serif as before. Any installed font name works here.
+            _fontName = Config.Bind("Look", "FontName", "wood sticks",
+                "An installed font to draw the list with - a twig font, by his choice. Empty, or " +
+                "not installed: a chiselled serif.");
             _maxLines = Config.Bind("Look", "MaxLines", 12,
                 new ConfigDescription("At most this many lines on the table at once. Below the last one, " +
                     "three dots say there is more; the wheel scrolls it into view.",
@@ -879,9 +889,20 @@ namespace GHCraftPad
         /// down-right, and the letter itself in a dark, slightly transparent ink over the wood.
         /// Hovered: the ink lightens, as if the groove were freshly cut.
         /// </summary>
-        private static void Print(Rect r, string text, GUIStyle style, bool bright)
+        private void Print(Rect r, string text, GUIStyle style, bool bright)
         {
             Color old = GUI.color;
+            if (_twig)
+            {
+                // Twigs: pale wood on the dark table, one soft shadow for the read, no engraving -
+                // the letters carry their own texture.
+                GUI.color = new Color(0f, 0f, 0f, 0.7f);
+                GUI.Label(new Rect(r.x + 2f, r.y + 2f, r.width, r.height), text, style);
+                GUI.color = bright ? new Color(1f, 0.95f, 0.8f, 1f) : new Color(0.88f, 0.8f, 0.62f, 0.95f);
+                GUI.Label(r, text, style);
+                GUI.color = old;
+                return;
+            }
             GUI.color = new Color(0f, 0f, 0f, 0.75f);
             GUI.Label(new Rect(r.x - 1f, r.y - 1f, r.width, r.height), text, style);
             GUI.color = new Color(1f, 0.95f, 0.85f, 0.55f);
@@ -918,6 +939,26 @@ namespace GHCraftPad
             _hover = new Texture2D(1, 1, TextureFormat.ARGB32, false);
             _hover.SetPixel(0, 0, new Color(1f, 1f, 1f, 0.08f)); _hover.Apply();
 
+            // The twig font first, if it is installed under that name (case does not matter).
+            try
+            {
+                string want = (_fontName.Value ?? "").Trim();
+                if (want.Length > 0)
+                {
+                    string[] installed = Font.GetOSInstalledFontNames();
+                    string found = null;
+                    for (int i = 0; installed != null && i < installed.Length; i++)
+                        if (string.Equals(installed[i], want, StringComparison.OrdinalIgnoreCase)) { found = installed[i]; break; }
+                    if (found != null)
+                    {
+                        Font f = Font.CreateDynamicFontFromOSFont(found, 16);
+                        if (f != null) { _chisel = f; _twig = true; Logger.LogInfo("list font: '" + found + "' (twigs)"); }
+                    }
+                    else Logger.LogInfo("list font: '" + want + "' is not installed - the chiselled serif is used");
+                }
+            }
+            catch (Exception ex) { Logger.LogWarning("list font: " + ex.Message); }
+
             // A serif, bold, for the chisel: open-source faces first, then what Windows ships.
             // Whichever is found is named in the log; none found = the skin's own font.
             string[] faces = new string[] { "Linux Libertine O", "Liberation Serif", "DejaVu Serif", "Noto Serif", "Georgia", "Times New Roman" };
@@ -934,7 +975,7 @@ namespace GHCraftPad
             _title = new GUIStyle(GUI.skin.label); _title.fontSize = 18; _title.fontStyle = FontStyle.Bold;
             _title.normal.textColor = new Color(0.96f, 0.97f, 1f);
             // The lines on the table: white text, coloured by GUI.color in Print() - the chisel.
-            _row = new GUIStyle(GUI.skin.label); _row.fontSize = 16; _row.fontStyle = FontStyle.Bold; _row.alignment = TextAnchor.MiddleLeft;
+            _row = new GUIStyle(GUI.skin.label); _row.fontSize = 16; _row.fontStyle = _twig ? FontStyle.Normal : FontStyle.Bold; _row.alignment = TextAnchor.MiddleLeft;
             if (_chisel != null) _row.font = _chisel;
             _row.normal.textColor = Color.white;
             _rowDim = new GUIStyle(_row); _rowDim.normal.textColor = new Color(1f, 1f, 1f, 0.55f);

@@ -38,6 +38,7 @@ Needs [BepInEx 5](https://github.com/BepInEx/BepInEx) (x64). Drop `GHCraftPad.dl
 
 | | |
 |---|---|
+| `Look.FontName` | an installed font to draw the list with (a twig font suits the game); empty or missing: a chiselled serif |
 | `Pad.BoxRadiusMetres` | how far around you boxes count (default 15) |
 | `Pad.ShowNotLearnedRecipes` | list locked recipes greyed (default on) |
 | `Pad.CraftedItemToGroundIfNoRoom` | default on |
