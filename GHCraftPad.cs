@@ -46,7 +46,7 @@ namespace GHCraftPad
     {
         public const string Guid    = "com.mohammadkoush.ghcraftpad";
         public const string Name    = "GHCraftPad";
-        public const string Version = "2.3.1";
+        public const string Version = "2.4.0";
 
         private static GHCraftPadPlugin s_Self;
 
@@ -734,19 +734,24 @@ namespace GHCraftPad
             // it": straight down from the row's centre, plus how far the mouse is beyond the text's
             // end, so the swell follows the pointer in from any side and fades on any side. Then the
             // lines are laid one under the other at their own sizes.
-            int fit = Mathf.Max(1, (int)((Screen.height - origin.y - 2f * rowH) / rowH));
+            // IN PLACE. His words: "the lines are far enough for the font to magnify in its place
+            // without moving any lines below it" - the dock's icons swell where they stand. So the
+            // pitch between lines is fixed at what the biggest swell needs, and each line grows
+            // inside its own slot; nothing below it moves.
+            float pitch = rowH * (_magnify.Value ? Mathf.Max(1f, _magnifyScale.Value) : 1f);
+            int fit = Mathf.Max(1, (int)((Screen.height - origin.y - rowH - pitch) / pitch));
             _firstLine = Mathf.Clamp(_firstLine, 0, Mathf.Max(0, show.Count - fit));
             float y = origin.y + rowH;
             float restY = y;
             int shown = 0;
-            for (int i = _firstLine; i < show.Count && shown < fit; i++, shown++, restY += rowH)
+            for (int i = _firstLine; i < show.Count && shown < fit; i++, shown++, restY += pitch)
             {
                 Line ln = show[i];
                 float textW = ln.Header ? baseSize * 14f : Mathf.Min(width, baseSize * 0.55f * (ln.Label.Length + 14));
                 float dx = Mathf.Max(0f, Mathf.Max(origin.x - e.mousePosition.x, e.mousePosition.x - (origin.x + textW)));
-                float dy = e.mousePosition.y - (restY + rowH * 0.5f);
+                float dy = e.mousePosition.y - (restY + pitch * 0.5f);
                 float sc = Eased(ln, Swell(Mathf.Sqrt(dx * dx + dy * dy)));
-                float h = rowH * sc;
+                float h = pitch;                                   // the slot never changes size
                 if (y + h > Screen.height) break;
                 Rect rr = new Rect(origin.x, y, width, h);
                 bool hover = rr.Contains(e.mousePosition);
