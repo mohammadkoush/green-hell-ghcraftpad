@@ -46,7 +46,7 @@ namespace GHCraftPad
     {
         public const string Guid    = "com.mohammadkoush.ghcraftpad";
         public const string Name    = "GHCraftPad";
-        public const string Version = "2.8.0";
+        public const string Version = "2.9.0";
 
         private static GHCraftPadPlugin s_Self;
 
@@ -315,6 +315,13 @@ namespace GHCraftPad
                 if (it == null || it.m_Info == null) continue;
                 if (keep != null && keep.ContainsKey((int)it.m_Info.m_ID)) continue;    // the new recipe wants it
                 cm.RemoveItem(it, false, false);
+                Stand fromStand;
+                if (_borrowedFromStand.TryGetValue(it, out fromStand) && fromStand != null)
+                {
+                    _borrowedFromStand.Remove(it);
+                    try { fromStand.DropItemToStand(it); home++; } catch (Exception) { dropped++; }
+                    continue;
+                }
                 Storage box;
                 if (_borrowed.TryGetValue(it, out box) && box != null)
                 {
@@ -333,6 +340,21 @@ namespace GHCraftPad
 
         private void ReturnBorrowed(CraftingManager cm)
         {
+            // Parts from a stand go back onto it, the game's own way, if they are still on the table.
+            if (_borrowedFromStand.Count > 0)
+            {
+                List<Item> standKeys = new List<Item>(_borrowedFromStand.Keys);
+                int back = 0;
+                for (int i = 0; i < standKeys.Count; i++)
+                {
+                    Item it = standKeys[i]; Stand st = _borrowedFromStand[it];
+                    if (it == null) continue;
+                    if (cm.m_Items == null || !cm.m_Items.Contains(it)) continue;
+                    try { cm.RemoveItem(it, false, false); if (st != null) st.DropItemToStand(it); back++; } catch (Exception) { }
+                }
+                _borrowedFromStand.Clear();
+                if (back > 0) Logger.LogInfo("table closed: " + back + " part(s) went back onto their stand");
+            }
             if (_borrowed.Count == 0) return;
             int home = 0, dropped = 0;
             List<Item> keys = new List<Item>(_borrowed.Keys);
@@ -388,6 +410,57 @@ namespace GHCraftPad
             return outl;
         }
 
+        // STANDS AND CRATES. His screenshot, 2026-09-20: two crates full of bones, "Bone Armor -
+        // need 3 Bone". Those crates are SmallStorage, which is a Stand, and a Stand holds a COUNT of
+        // one item kind (m_NumItems), not Item objects - as do the log, plank and stick stands. So
+        // they were invisible to a scan of m_Items. A stand is read by its kind and count, and a
+        // part taken from it is made by the game (Stand.RemoveItems() creates one at the stand and
+        // takes one off the count), then goes onto the table. A borrowed part goes back with the
+        // game's own DropItemToStand.
+        private List<Stand> StandsInRange()
+        {
+            List<Stand> outl = new List<Stand>();
+            Player p = Player.Get();
+            if (p == null) return outl;
+            if (Time.realtimeSinceStartup - _standCacheAt > 2f)
+            {
+                _standCacheAt = Time.realtimeSinceStartup;
+                try { _standCache = UnityEngine.Object.FindObjectsOfType<Stand>(); } catch (Exception) { _standCache = new Stand[0]; }
+            }
+            float r2 = _radius.Value * _radius.Value;
+            Vector3 me = p.transform.position;
+            for (int i = 0; i < _standCache.Length; i++)
+            {
+                Stand st = _standCache[i];
+                if (st == null || !st.m_CanRemove) continue;
+                try { if (st.GetNumitems() <= 0 || st.GetStoredItemId() == Enums.ItemID.None) continue; } catch (Exception) { continue; }
+                if ((st.transform.position - me).sqrMagnitude > r2) continue;
+                outl.Add(st);
+            }
+            outl.Sort(delegate (Stand a, Stand b)
+            {
+                return (a.transform.position - me).sqrMagnitude.CompareTo((b.transform.position - me).sqrMagnitude);
+            });
+            return outl;
+        }
+        private Stand[] _standCache = new Stand[0];
+        private float _standCacheAt = -99f;
+        private readonly Dictionary<Item, Stand> _borrowedFromStand = new Dictionary<Item, Stand>();
+
+        private static void CountStands(Dictionary<int, int> tally, List<Stand> stands)
+        {
+            for (int i = 0; i < stands.Count; i++)
+            {
+                try
+                {
+                    int key = (int)stands[i].GetStoredItemId();
+                    int n; tally.TryGetValue(key, out n);
+                    tally[key] = n + stands[i].GetNumitems();
+                }
+                catch (Exception) { }
+            }
+        }
+
         private static void CountInto(Dictionary<int, int> tally, List<Item> items)
         {
             if (items == null) return;
@@ -409,13 +482,15 @@ namespace GHCraftPad
             if (cm == null || bp == null || im == null) return;
 
             List<Storage> boxes = BoxesInRange();
-            _boxesInRange = boxes.Count;
+            List<Stand> stands = StandsInRange();
+            _boxesInRange = boxes.Count + stands.Count;
 
             Dictionary<int, int> have = new Dictionary<int, int>();
             CountInto(have, cm.m_Items);
             CountInto(have, bp.m_Items);
             Dictionary<int, int> inBoxes = new Dictionary<int, int>();
             for (int i = 0; i < boxes.Count; i++) CountInto(inBoxes, boxes[i].m_Items);
+            CountStands(inBoxes, stands);
             foreach (KeyValuePair<int, int> kv in inBoxes) { int n; have.TryGetValue(kv.Key, out n); have[kv.Key] = n + kv.Value; }
 
             // THE GAME'S OWN LIST, not a filter of mine. "Not all the recipes are there": the first
@@ -502,9 +577,10 @@ namespace GHCraftPad
             if (cm == null || bp == null) return;
             int n = Mathf.Clamp(ln.Count, 1, Mathf.Max(1, ln.CanMake));
             List<Storage> boxes = BoxesInRange();
+            List<Stand> stands = StandsInRange();
 
             // Conservation, before.
-            Dictionary<int, int> before = Census(cm, bp, boxes);
+            Dictionary<int, int> before = Census(cm, bp, boxes, stands);
 
             // A CLEAN TABLE FIRST. His glitch: "if I change my mind and want to build something
             // else, the table needs to clear out first. Bringing two recipes will stop the
@@ -566,6 +642,27 @@ namespace GHCraftPad
                     }
                 }
 
+                // Then the stands and crates, nearest first: the game makes the part at the stand
+                // and takes one off the count; the new part goes onto the table.
+                for (int sidx = 0; sidx < stands.Count && want > 0; sidx++)
+                {
+                    Stand st = stands[sidx];
+                    try
+                    {
+                        if (st.GetStoredItemId() != id) continue;
+                        while (want > 0 && st.GetNumitems() > 0)
+                        {
+                            Item made = TakeOneFromStand(st, id);
+                            if (made == null) break;
+                            if (!cm.CanAddItem(made)) { st.DropItemToStand(made); break; }
+                            cm.AddItem(made, true, true);
+                            _borrowedFromStand[made] = st;
+                            pulledBox++; want--;
+                        }
+                    }
+                    catch (Exception ex) { Logger.LogWarning("pull from a stand: " + ex.Message); }
+                }
+
                 if (want > 0)
                 {
                     Logger.LogWarning("pull: still short " + want + " x " + id + " for " + ln.Result + " - the table has what could be found; craft what it offers");
@@ -574,6 +671,23 @@ namespace GHCraftPad
 
                 // The other sets: in the backpack, or brought there from the boxes.
                 int extra = c.Value * (n - 1) - bp.GetItemsCount(id);
+                for (int sidx = 0; sidx < stands.Count && extra > 0; sidx++)
+                {
+                    Stand st = stands[sidx];
+                    try
+                    {
+                        if (st.GetStoredItemId() != id) continue;
+                        while (extra > 0 && st.GetNumitems() > 0)
+                        {
+                            Item made = TakeOneFromStand(st, id);
+                            if (made == null) break;
+                            InsertResult r = bp.InsertItem(made, null, null, true, false, false, true, true);
+                            if (r != InsertResult.Ok) { st.DropItemToStand(made); break; }
+                            toPack++; extra--;
+                        }
+                    }
+                    catch (Exception ex) { Logger.LogWarning("pull from a stand to the backpack: " + ex.Message); }
+                }
                 for (int b = 0; b < boxes.Count && extra > 0; b++)
                 {
                     Storage box = boxes[b];
@@ -595,7 +709,7 @@ namespace GHCraftPad
             }
 
             // Conservation, after: every id must total the same across the three places.
-            Dictionary<int, int> after = Census(cm, bp, boxes);
+            Dictionary<int, int> after = Census(cm, bp, boxes, stands);
             foreach (KeyValuePair<int, int> kv in before)
             {
                 int a; after.TryGetValue(kv.Key, out a);
@@ -621,13 +735,29 @@ namespace GHCraftPad
             _linesAt = 0f;
         }
 
-        private static Dictionary<int, int> Census(CraftingManager cm, InventoryBackpack bp, List<Storage> boxes)
+        private static Dictionary<int, int> Census(CraftingManager cm, InventoryBackpack bp, List<Storage> boxes, List<Stand> stands)
         {
             Dictionary<int, int> t = new Dictionary<int, int>();
             CountInto(t, cm.m_Items);
             CountInto(t, bp.m_Items);
             for (int i = 0; i < boxes.Count; i++) CountInto(t, boxes[i].m_Items);
+            CountStands(t, stands);
             return t;
+        }
+
+        /// <summary>
+        /// One part off a stand, the game's way: Stand.AddItemToBackpack (its IL) creates the item
+        /// with ItemsManager.CreateItem and takes one off the count; RemoveItems(1) is that decrement,
+        /// public. (RemoveItems() with no count spills the WHOLE stand as items - not this.)
+        /// </summary>
+        private Item TakeOneFromStand(Stand st, Enums.ItemID id)
+        {
+            ItemsManager im = ItemsManager.Get();
+            if (im == null) return null;
+            Item made = im.CreateItem(id, true, st.transform.position + Vector3.up * 0.6f, Quaternion.identity, false);
+            if (made == null) return null;
+            st.RemoveItems(1);
+            return made;
         }
 
         // -----------------------------------------------------------------------------------------
