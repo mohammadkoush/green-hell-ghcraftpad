@@ -11,9 +11,10 @@ chiselled into the wood. It is the game's own recipe list, every entry of it, in
 (weapons, tools, armor, food and medicine, camp, other), recipes not learned yet greyed. Each line
 says what you can make right now from three places counted together: what is already
 on the table, what is in your backpack, and what is in every storage box within a radius of you. Roll
-the mouse wheel over a line to choose how many; click it, and the ingredients are brought onto the
-table — table first, then backpack, then the nearest boxes — with the count set. Then press the game's
-own Craft button. (`Pad.CraftAfterPull` starts the crafting by itself instead.)
+the mouse wheel over a line to choose how many; click it. One set of parts goes onto the table (the
+game matches the table against exactly one recipe), the other sets are made sure of in your backpack,
+brought from the boxes when short, and the craft starts with that count. (`Pad.CraftOnClick` off:
+the click only lays the parts out and you press the game's Craft.)
 
 **Never a duplicate.** Every pull moves the same item out of its box and onto the table — never a
 copy. After every pull the mod counts that item across table, backpack and boxes and compares it
@@ -41,7 +42,7 @@ Needs [BepInEx 5](https://github.com/BepInEx/BepInEx) (x64). Drop `GHCraftPad.dl
 | `Pad.ShowNotLearnedRecipes` | list locked recipes greyed (default on) |
 | `Pad.CraftedItemToGroundIfNoRoom` | default on |
 | `Pad.CraftedItemGoesTo` | None (the game's way), Storage or Backpack |
-| `Pad.CraftAfterPull` | default off: a click only brings the parts |
+| `Pad.CraftOnClick` | default on: the click crafts the dialled count |
 
 ## Build
 

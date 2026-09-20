@@ -46,7 +46,7 @@ namespace GHCraftPad
     {
         public const string Guid    = "com.mohammadkoush.ghcraftpad";
         public const string Name    = "GHCraftPad";
-        public const string Version = "2.5.0";
+        public const string Version = "2.6.0";
 
         private static GHCraftPadPlugin s_Self;
 
@@ -178,10 +178,12 @@ namespace GHCraftPad
                 new ConfigDescription("At most this many lines on the table at once. Below the last one, " +
                     "three dots say there is more; the wheel scrolls it into view.",
                     new AcceptableValueRange<int>(3, 60)));
-            _craftAfterPull = Config.Bind("Pad", "CraftAfterPull", false,
-                "Off (his rule): clicking a recipe only brings its parts to the table, and the game's " +
-                "own Craft button makes the item with the count you dialled. On: the crafting starts " +
-                "by itself.");
+            // ON again (key renamed so it reaches his cfg): "the number on the scroll is how many to
+            // craft when I click" - the click is the trigger, the wheel is the count.
+            _craftAfterPull = Config.Bind("Pad", "CraftOnClick", true,
+                "Clicking a recipe brings one set to the table, the other sets to the backpack, and " +
+                "starts the craft with the count you dialled. Off: it only lays the parts out and " +
+                "you press the game's Craft button.");
             _destination = Config.Bind("Pad", "CraftedItemGoesTo", "None",
                 new ConfigDescription("Where a crafted item goes: Storage (the nearest box in range with " +
                     "room), Backpack, or None for the game's own way.",
@@ -500,11 +502,17 @@ namespace GHCraftPad
             // the backpack - the same move closing the table makes.
             ClearTableExcept(cm, bp, ln.Need);
 
-            int pulledPack = 0, pulledBox = 0;
+            // ONE SET ON THE TABLE, THE REST IN THE BACKPACK. His finding: "the game does not allow
+            // to gather all ingredients needed for multiple crafts on the table" - CheckResult
+            // matches the table against exactly one recipe, and the count it allows
+            // (m_MaxResultsCount) is what the BACKPACK holds beyond that. So the table gets one
+            // set, the other n-1 sets are made sure of in the backpack (from the boxes when short),
+            // the count is set, and the craft starts on the click with that count.
+            int pulledPack = 0, pulledBox = 0, toPack = 0;
             foreach (KeyValuePair<int, int> c in ln.Need)
             {
                 Enums.ItemID id = (Enums.ItemID)c.Key;
-                int want = c.Value * n;
+                int want = c.Value;
 
                 // Already on the table.
                 for (int i = 0; i < cm.m_Items.Count && want > 0; i++)
@@ -551,6 +559,27 @@ namespace GHCraftPad
                     Logger.LogWarning("pull: still short " + want + " x " + id + " for " + ln.Result + " - the table has what could be found; craft what it offers");
                     Say("Short " + want + " " + Pretty(id) + " - pulled what there was");
                 }
+
+                // The other sets: in the backpack, or brought there from the boxes.
+                int extra = c.Value * (n - 1) - bp.GetItemsCount(id);
+                for (int b = 0; b < boxes.Count && extra > 0; b++)
+                {
+                    Storage box = boxes[b];
+                    List<Item> take = new List<Item>();
+                    for (int i = 0; i < box.m_Items.Count && take.Count < extra; i++)
+                    {
+                        Item it = box.m_Items[i];
+                        if (it != null && it.m_Info != null && it.m_Info.m_ID == id) take.Add(it);
+                    }
+                    for (int i = 0; i < take.Count; i++)
+                    {
+                        box.RemoveItem(take[i], false);
+                        InsertResult r = bp.InsertItem(take[i], null, null, true, false, false, true, true);
+                        if (r != InsertResult.Ok) { box.InsertItem(take[i], null, null, false, true, false); break; }   // no room: back it goes
+                        toPack++; extra--;
+                    }
+                }
+                if (extra > 0) Logger.LogInfo("pull: the backpack holds sets for fewer than " + n + " x " + ln.Result + " - short " + extra + " x " + id + "; the game will make what it can");
             }
 
             // Conservation, after: every id must total the same across the three places.
@@ -565,17 +594,18 @@ namespace GHCraftPad
             // AddItem resets the wanted count to 1 each time, so it is set last; the game's own
             // count buttons and Craft button then work with it. His rule: clicking brings the stuff
             // to the table, nothing more - the game crafts when he presses Craft.
-            cm.m_WantedResultsCount = n;
+            cm.m_WantedResultsCount = Mathf.Clamp(n, 1, Mathf.Max(1, cm.m_MaxResultsCount));
             if (_craftAfterPull.Value)
             {
                 try { cm.StartCrafting(ln.Result, false); }
                 catch (Exception ex) { Logger.LogWarning("StartCrafting: " + ex.Message + " - the parts are on the table, press the game's craft button"); }
             }
 
-            Logger.LogInfo("pad: " + n + " x " + ln.Result + " - pulled " + pulledPack + " from the backpack, " + pulledBox + " from " + boxes.Count + " box(es)"
-                + (_craftAfterPull.Value ? ", crafting" : ", on the table"));
-            Say(n + " x " + Pretty(ln.Result) + " on the table" + (pulledBox > 0 ? " - " + pulledBox + " part(s) from your boxes" : "")
-                + (_craftAfterPull.Value ? "" : " - press Craft"));
+            Logger.LogInfo("pad: " + n + " x " + ln.Result + " - one set on the table (" + pulledPack + " from the backpack, " + pulledBox
+                + " from boxes), " + toPack + " part(s) brought to the backpack for the rest; the game allows " + cm.m_MaxResultsCount
+                + (_craftAfterPull.Value ? ", crafting " + cm.m_WantedResultsCount : ", on the table"));
+            Say((_craftAfterPull.Value ? "Making " : "On the table: ") + cm.m_WantedResultsCount + " x " + Pretty(ln.Result)
+                + (pulledBox + toPack > 0 ? " - " + (pulledBox + toPack) + " part(s) from your boxes" : "") + (_craftAfterPull.Value ? "" : " - press Craft"));
             _linesAt = 0f;
         }
 
