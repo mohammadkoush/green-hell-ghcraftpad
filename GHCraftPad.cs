@@ -46,7 +46,7 @@ namespace GHCraftPad
     {
         public const string Guid    = "com.mohammadkoush.ghcraftpad";
         public const string Name    = "GHCraftPad";
-        public const string Version = "2.4.0";
+        public const string Version = "2.5.0";
 
         private static GHCraftPadPlugin s_Self;
 
@@ -59,6 +59,7 @@ namespace GHCraftPad
         private ConfigEntry<bool>   _magnify;
         private ConfigEntry<float>  _magnifyScale;
         private ConfigEntry<float>  _magnifyRadius;
+        private ConfigEntry<int>    _maxLines;
         // Where a crafted item goes: the game's own way, a storage box, or the backpack. Config
         // only since 2.0.0 - the arrows went with the window.
         private ConfigEntry<string> _destination;      // "None" | "Storage" | "Backpack"
@@ -173,6 +174,10 @@ namespace GHCraftPad
             _magnifyRadius = Config.Bind("Look", "MagnifyRadiusPixels", 90f,
                 new ConfigDescription("How far from the mouse the swelling reaches.",
                     new AcceptableValueRange<float>(20f, 400f)));
+            _maxLines = Config.Bind("Look", "MaxLines", 12,
+                new ConfigDescription("At most this many lines on the table at once. Below the last one, " +
+                    "three dots say there is more; the wheel scrolls it into view.",
+                    new AcceptableValueRange<int>(3, 60)));
             _craftAfterPull = Config.Bind("Pad", "CraftAfterPull", false,
                 "Off (his rule): clicking a recipe only brings its parts to the table, and the game's " +
                 "own Craft button makes the item with the count you dialled. On: the crafting starts " +
@@ -701,7 +706,7 @@ namespace GHCraftPad
             // The handle line: drag to move; it also says what the mouse does.
             Rect head = new Rect(origin.x, origin.y, width, rowH);
             _small.fontSize = Mathf.Max(9, (int)(baseSize * 0.75f));
-            Print(head, "::  " + _boxesInRange + " box" + (_boxesInRange == 1 ? "" : "es") + " in reach   -   drag me;  click a heading to open it;  wheel: how many;  click: to the table;  Ctrl+wheel: size", _small, head.Contains(e.mousePosition));
+            Print(head, "::  " + _boxesInRange + " box" + (_boxesInRange == 1 ? "" : "es") + " in reach   -   drag me;  click a heading to open it;  wheel: scroll, or how many over a line;  click: to the table;  Ctrl+wheel: size", _small, head.Contains(e.mousePosition));
             if (e.type == EventType.MouseDown && e.button == 0 && head.Contains(e.mousePosition)) { _drag = true; _dragOff = e.mousePosition - origin; e.Use(); }
             if (_drag && e.type == EventType.MouseDrag) { origin = e.mousePosition - _dragOff; SaveOrigin(origin); e.Use(); }
             if (_drag && (e.type == EventType.MouseUp || e.rawType == EventType.MouseUp)) { _drag = false; e.Use(); }
@@ -715,7 +720,9 @@ namespace GHCraftPad
                 e.Use();
                 return;
             }
-            bool scrollHere = e.type == EventType.ScrollWheel && !e.control && (head.Contains(e.mousePosition) || (e.shift && overList));
+            // The wheel scrolls anywhere over the list - a heading, a line you cannot make, the dots,
+            // the handle - and dials the count only over a line you can make (Shift + wheel scrolls there too).
+            bool scrollHere = e.type == EventType.ScrollWheel && !e.control && overList;
 
             if (_lines.Count == 0)
             {
@@ -740,6 +747,7 @@ namespace GHCraftPad
             // inside its own slot; nothing below it moves.
             float pitch = rowH * (_magnify.Value ? Mathf.Max(1f, _magnifyScale.Value) : 1f);
             int fit = Mathf.Max(1, (int)((Screen.height - origin.y - rowH - pitch) / pitch));
+            fit = Mathf.Min(fit, Mathf.Max(3, _maxLines.Value));
             _firstLine = Mathf.Clamp(_firstLine, 0, Mathf.Max(0, show.Count - fit));
             float y = origin.y + rowH;
             float restY = y;
@@ -763,7 +771,6 @@ namespace GHCraftPad
                     string hl = ln.Label + (open ? "" : "   (" + ln.InCat + (ln.MadeInCat > 0 ? ", " + ln.MadeInCat + " you can make" : "") + ")");
                     if (hover && e.type == EventType.Repaint) GUI.DrawTexture(rr, _hover);
                     Print(rr, hl, _head, hover);
-                    if (hover && e.type == EventType.ScrollWheel && !e.control) scrollHere = true;
                     if (hover && e.type == EventType.MouseUp && e.button == 0 && !_drag)
                     {
                         _openCat = open ? -1 : ln.Cat;       // one open at a time
@@ -784,6 +791,7 @@ namespace GHCraftPad
                 if (can && hover && e.type == EventType.ScrollWheel && !e.control && !e.shift)
                 {
                     ln.Count = Mathf.Clamp(ln.Count - (int)Mathf.Sign(e.delta.y), 1, ln.CanMake);
+                    scrollHere = false;
                     e.Use();
                 }
                 if (can && hover && e.type == EventType.MouseUp && e.button == 0 && !_drag)
@@ -796,11 +804,13 @@ namespace GHCraftPad
             }
             _row.fontSize = baseSize; _rowDim.fontSize = baseSize; _head.fontSize = baseSize + 1;
             if (e.type == EventType.Repaint) _lastRepaint = Time.realtimeSinceStartup;
-            if (_firstLine + shown < show.Count)
-                Print(new Rect(origin.x, y, width, rowH), "... " + (show.Count - _firstLine - shown) + " more (wheel over a heading, or Shift + wheel)", _small, false);
+            // Three dots: there is more below. Three dots above the first line: there is more above.
+            _head.fontSize = baseSize + 1;
+            if (_firstLine + shown < show.Count) Print(new Rect(origin.x, y, width, rowH), "    . . .", _head, false);
+            if (_firstLine > 0) Print(new Rect(origin.x, origin.y + rowH * 0.55f, width, rowH * 0.6f), "    . . .", _small, false);
             if (scrollHere)
             {
-                _firstLine = Mathf.Clamp(_firstLine + (int)Mathf.Sign(e.delta.y) * 3, 0, Mathf.Max(0, show.Count - fit));
+                _firstLine = Mathf.Clamp(_firstLine + (int)Mathf.Sign(e.delta.y), 0, Mathf.Max(0, show.Count - fit));
                 e.Use();
             }
         }
