@@ -46,7 +46,7 @@ namespace GHCraftPad
     {
         public const string Guid    = "com.mohammadkoush.ghcraftpad";
         public const string Name    = "GHCraftPad";
-        public const string Version = "2.7.0";
+        public const string Version = "2.8.0";
 
         private static GHCraftPadPlugin s_Self;
 
@@ -181,9 +181,11 @@ namespace GHCraftPad
             // repository is public); it uses one INSTALLED on the machine, by name. With the named
             // font present the lines are drawn as pale twigs with a shadow; without it, the
             // chiselled serif as before. Any installed font name works here.
-            _fontName = Config.Bind("Look", "FontName", "wood sticks",
-                "An installed font to draw the list with - a twig font, by his choice. Empty, or " +
-                "not installed: a chiselled serif.");
+            // "Just use a normal font. None of that is helping." (2026-09-20) The default is the
+            // game's own UI font, plain, pale, with one shadow. A name here still picks an installed
+            // font for anyone who wants one.
+            _fontName = Config.Bind("Look", "FontName", "",
+                "An installed font to draw the list with. Empty: the game's own.");
             _maxLines = Config.Bind("Look", "MaxLines", 12,
                 new ConfigDescription("At most this many lines on the table at once. Below the last one, " +
                     "three dots say there is more; the wheel scrolls it into view.",
@@ -894,11 +896,10 @@ namespace GHCraftPad
             Color old = GUI.color;
             if (_twig)
             {
-                // Twigs: pale wood on the dark table, one soft shadow for the read, no engraving -
-                // the letters carry their own texture.
-                GUI.color = new Color(0f, 0f, 0f, 0.7f);
-                GUI.Label(new Rect(r.x + 2f, r.y + 2f, r.width, r.height), text, style);
-                GUI.color = bright ? new Color(1f, 0.95f, 0.8f, 1f) : new Color(0.88f, 0.8f, 0.62f, 0.95f);
+                // Plain: pale text on the dark table, one soft shadow for the read.
+                GUI.color = new Color(0f, 0f, 0f, 0.75f);
+                GUI.Label(new Rect(r.x + 1f, r.y + 1f, r.width, r.height), text, style);
+                GUI.color = bright ? Color.white : new Color(0.93f, 0.93f, 0.9f, 0.95f);
                 GUI.Label(r, text, style);
                 GUI.color = old;
                 return;
@@ -952,30 +953,19 @@ namespace GHCraftPad
                     if (found != null)
                     {
                         Font f = Font.CreateDynamicFontFromOSFont(found, 16);
-                        if (f != null) { _chisel = f; _twig = true; Logger.LogInfo("list font: '" + found + "' (twigs)"); }
+                        if (f != null) { _chisel = f; Logger.LogInfo("list font: '" + found + "'"); }
                     }
-                    else Logger.LogInfo("list font: '" + want + "' is not installed - the chiselled serif is used");
+                    else Logger.LogInfo("list font: '" + want + "' is not installed - the game's own is used");
                 }
             }
             catch (Exception ex) { Logger.LogWarning("list font: " + ex.Message); }
 
-            // A serif, bold, for the chisel: open-source faces first, then what Windows ships.
-            // Whichever is found is named in the log; none found = the skin's own font.
-            string[] faces = new string[] { "Linux Libertine O", "Liberation Serif", "DejaVu Serif", "Noto Serif", "Georgia", "Times New Roman" };
-            for (int i = 0; i < faces.Length && _chisel == null; i++)
-            {
-                try
-                {
-                    Font f = Font.CreateDynamicFontFromOSFont(faces[i], 16);
-                    if (f != null && f.fontNames != null && f.fontNames.Length > 0) { _chisel = f; Logger.LogInfo("chisel font: " + faces[i]); }
-                }
-                catch (Exception) { }
-            }
+            _twig = true;                      // plain drawing: text and one shadow, no engraving
 
             _title = new GUIStyle(GUI.skin.label); _title.fontSize = 18; _title.fontStyle = FontStyle.Bold;
             _title.normal.textColor = new Color(0.96f, 0.97f, 1f);
             // The lines on the table: white text, coloured by GUI.color in Print() - the chisel.
-            _row = new GUIStyle(GUI.skin.label); _row.fontSize = 16; _row.fontStyle = _twig ? FontStyle.Normal : FontStyle.Bold; _row.alignment = TextAnchor.MiddleLeft;
+            _row = new GUIStyle(GUI.skin.label); _row.fontSize = 16; _row.fontStyle = FontStyle.Bold; _row.alignment = TextAnchor.MiddleLeft;
             if (_chisel != null) _row.font = _chisel;
             _row.normal.textColor = Color.white;
             _rowDim = new GUIStyle(_row); _rowDim.normal.textColor = new Color(1f, 1f, 1f, 0.55f);
